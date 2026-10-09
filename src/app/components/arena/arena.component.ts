@@ -55,7 +55,7 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
               <span class="turn-indicator" *ngIf="opp.id === gameService.state().currentTurnPlayerId">TURN</span>
             </div>
 
-            <!-- Opponent Cards (CLOSED face-down during active game!) -->
+            <!-- Opponent Cards (CLOSED face-down during active game; click to peek/match!) -->
             <div class="opponent-cards-grid">
               <div 
                 *ngFor="let c of opp.cards; let idx = index" 
@@ -64,7 +64,8 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
                 <app-card 
                   [card]="c" 
                   [isFaceUp]="isCardFaceUp(opp.id, idx, c)"
-                  [isSelectable]="isCardSelectableForAction(opp.id, idx)"
+                  [isTemporarilyOpen]="gameService.isCardTemporarilyOpen(c.id)"
+                  [isSelectable]="isCardSelectable(opp.id, idx)"
                   [slotIndex]="idx">
                 </app-card>
               </div>
@@ -154,7 +155,7 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
             </div>
           </div>
 
-          <!-- CARDS GRID: CLOSED FACE DOWN DURING PLAYING! -->
+          <!-- CARDS GRID: CLOSED FACE DOWN DURING PLAYING; CLICK TO PEEK/MATCH! -->
           <div class="my-cards-grid">
             <div 
               class="my-card-slot" 
@@ -164,19 +165,11 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
               <app-card 
                 [card]="card" 
                 [isFaceUp]="isCardFaceUp(me.id, idx, card)"
-                [isSelectable]="isCardSelectableForAction(me.id, idx) || gameService.state().drawnCard !== null"
+                [isTemporarilyOpen]="gameService.isCardTemporarilyOpen(card.id)"
+                [isSelectable]="isCardSelectable(me.id, idx)"
                 [isPeeked]="isCardCurrentlyPeeked(card)"
                 [slotIndex]="idx">
               </app-card>
-
-              <!-- QUICK SLAP BUTTON -->
-              <button 
-                class="snap-btn" 
-                *ngIf="gameService.state().phase === 'PLAYING'"
-                (click)="$event.stopPropagation(); gameService.snapCard(idx)"
-                title="Match rank with discard pile to shed this card! (Wrong guess = Penalty card)">
-                ⚡ SLAP
-              </button>
             </div>
           </div>
 
@@ -1096,25 +1089,16 @@ export class ArenaComponent {
   }
 
   onCardClicked(targetPlayerId: string, slotIndex: number): void {
-    // 1. If active power action is underway
-    if (this.gameService.state().activeAction) {
-      this.gameService.handleCardClickDuringAction(targetPlayerId, slotIndex);
-      return;
-    }
-
-    // 2. If local player is holding a drawn card and clicked one of their own cards -> Replace!
-    if (this.gameService.state().drawnCard !== null && targetPlayerId === this.gameService.localPlayerId()) {
-      this.gameService.replaceCardInHand(slotIndex);
-      return;
-    }
+    this.gameService.handleCardClick(targetPlayerId, slotIndex);
   }
 
   /**
    * PURE MEMORY RULE:
    * Cards are ONLY face-up:
    * 1. At GAME_OVER (all revealed).
-   * 2. During INITIAL_PEEK phase, local player's bottom 2 cards (#3 and #4) are face up for memorization.
-   * 3. IN ALL OTHER MOMENTS (PLAYING, active turns), ALL CARDS ARE CLOSED / FACE DOWN!
+   * 2. When temporarily peeked (3-second countdown timer).
+   * 3. During INITIAL_PEEK phase, local player's bottom 2 cards (#3 and #4) are face up for memorization.
+   * 4. IN ALL OTHER MOMENTS, ALL CARDS ARE CLOSED / FACE DOWN!
    */
   isCardFaceUp(playerId: string, slotIndex: number, card: Card): boolean {
     const phase = this.gameService.state().phase;
@@ -1122,33 +1106,25 @@ export class ArenaComponent {
     // 1. All revealed at GAME_OVER
     if (phase === 'GAME_OVER') return true;
 
-    // 2. Only during INITIAL_PEEK for the local player's bottom 2 cards
+    // 2. Temporarily open via peek function (3s timer)
+    if (this.gameService.isCardTemporarilyOpen(card.id)) return true;
+
+    // 3. Only during INITIAL_PEEK for the local player's bottom 2 cards
     if (phase === 'INITIAL_PEEK' && playerId === this.gameService.localPlayerId() && (slotIndex === 2 || slotIndex === 3)) {
       return true;
     }
 
-    // 3. During PLAYING phase, all cards are CLOSED!
+    // 4. During active match play, cards are completely CLOSED!
     return false;
   }
 
   isCardCurrentlyPeeked(card: Card): boolean {
-    return this.gameService.activePeek()?.card.id === card.id;
+    return this.gameService.isCardTemporarilyOpen(card.id) || this.gameService.activePeek()?.card.id === card.id;
   }
 
-  isCardSelectableForAction(playerId: string, slotIndex: number): boolean {
-    const action = this.gameService.state().activeAction;
-    if (!action || action.sourcePlayerId !== this.gameService.localPlayerId()) return false;
-
-    if (action.type === 'PEEK_OWN') {
-      return playerId === this.gameService.localPlayerId();
-    }
-    if (action.type === 'PEEK_OTHER') {
-      return playerId !== this.gameService.localPlayerId();
-    }
-    if (action.type === 'SWAP_SELECT_FIRST' || action.type === 'SWAP_SELECT_SECOND') {
-      return true;
-    }
-    return false;
+  isCardSelectable(playerId: string, slotIndex: number): boolean {
+    const phase = this.gameService.state().phase;
+    return phase === 'PLAYING' || phase === 'INITIAL_PEEK';
   }
 
   sortedPlayers(): Player[] {

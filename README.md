@@ -87,7 +87,8 @@ To add a new theme (e.g. `Pixel Arcade`):
 - **Objective:** End the game with the lowest total card points.
 - **Deal:** 4 face-down cards per player in a 2×2 grid. You peek at your bottom two cards only once at the start.
 - **Values:**
-  - Red Kings (♥ / ♦): **0 pts** (Best card!)
+  - Red Kings (♥ / ♦): **-1 pt** (The highest-value card!)
+  - Jokers (🃏): **0 pts**
   - Ace: **1 pt**
   - Numbers 2–10: **Face value**
   - Jack (J) & Queen (Q): **11 & 12 pts**
@@ -96,5 +97,9 @@ To add a new theme (e.g. `Pixel Arcade`):
   - 7 & 8: Peek at one of your own cards.
   - 9 & 10: Peek at one card of any opponent.
   - Jack & Queen: Swap any two cards in play without looking.
-- **Slap (Match Discard):** If the discard card matches the rank of any card you own, slap it in immediately to discard it. If you guessed wrong, draw a penalty card!
+- **Direct Card Click & 3-Second Peek:**
+  - Click on ANY closed card: It temporarily flips open for **3 seconds with a live timer bar**, then flips back face-down!
+  - **Match:** If it matches the top of the discard pile, the card is discarded! If you did it for an opponent, you discard their card and transfer one of your own cards to that opponent.
+  - **Mismatch:** If it does not match, you draw an **additional penalty card (+1)** from the deck!
+  - **Drawn Card Replacement:** If you drew a card on your turn, clicking your card replaces it with the drawn card and discards the old card.
 - **Calling Cambio:** Declare on your turn before drawing. All other players get one last turn, then all cards are flipped and totaled!

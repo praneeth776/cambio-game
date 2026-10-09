@@ -38,7 +38,7 @@ export type GamePhase =
   | 'GAME_OVER';
 
 export interface ActiveAction {
-  type: 'PEEK_OWN' | 'PEEK_OTHER' | 'SWAP_SELECT_FIRST' | 'SWAP_SELECT_SECOND';
+  type: 'PEEK_OWN' | 'PEEK_OTHER' | 'SWAP_SELECT_FIRST' | 'SWAP_SELECT_SECOND' | 'TRANSFER_CARD_TO_OPPONENT';
   sourcePlayerId: string;
   targetPlayerId?: string;
   firstCardIndex?: number;

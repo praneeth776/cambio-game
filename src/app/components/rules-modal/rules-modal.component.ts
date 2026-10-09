@@ -78,14 +78,24 @@ import { ThemeService } from '../../services/theme.service';
           </section>
 
           <section class="rule-section">
-            <h3>💥 THE SLAP / SNAP RULE</h3>
+            <h3>💥 CARD-CLICK MATCHING & 3-SECOND PEEK</h3>
             <p>
-              Whenever <em>any</em> card is placed on top of the Discard pile, if you know you possess a card of that <strong>exact same rank</strong>, hit <strong>SLAP</strong> immediately!
+              Click directly on ANY closed card (yours or an opponent's) at any time:
             </p>
-            <p>
-              ✓ If matched: Your card is discarded into the pile (you now have fewer cards!).<br>
-              ✗ If wrong: You draw a penalty card from the deck!
-            </p>
+            <ul class="action-list">
+              <li>
+                <strong>⏱️ 3-Second Peek Side Effect:</strong> The clicked card flips open for exactly 3 seconds with a live countdown timer, then flips back face-down!
+              </li>
+              <li>
+                <strong>✓ If card matches top of discard:</strong> That card is discarded to the pile! If you matched an <em>opponent's card</em>, you shed their card and transfer one of your own cards to that opponent!
+              </li>
+              <li>
+                <strong>✗ If card does NOT match:</strong> You made an incorrect guess and immediately draw a <strong>penalty card (+1)</strong> from the draw deck!
+              </li>
+              <li>
+                <strong>🃏 If you are holding a drawn card:</strong> Clicking your card switches it with your drawn card and discards the old card.
+              </li>
+            </ul>
           </section>
 
           <section class="rule-section">

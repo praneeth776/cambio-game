@@ -29,6 +29,13 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 
         <!-- CARD FRONT -->
         <div class="card-face card-front" *ngIf="card" [class.red-suit]="card.isRed">
+          
+          <!-- Temporary Peek 3s Timer Bar -->
+          <div class="timer-bar" *ngIf="isTemporarilyOpen">
+            <span class="timer-tag">⏱️ 3s PEEK</span>
+            <div class="timer-progress"></div>
+          </div>
+
           <div class="card-top-corner">
             <span class="rank">{{ card.label }}</span>
             <span class="suit-icon">{{ getSuitIcon(card.suit) }}</span>
@@ -240,6 +247,40 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
       letter-spacing: -1px;
     }
 
+    .timer-bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 18px;
+      background: rgba(0, 0, 0, 0.85);
+      border-bottom: 1px solid var(--color-primary);
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .timer-tag {
+      font-size: 8px;
+      font-weight: 900;
+      color: var(--color-primary);
+      text-align: center;
+      line-height: 14px;
+      letter-spacing: 0.5px;
+    }
+
+    .timer-progress {
+      height: 3px;
+      background: var(--color-primary);
+      animation: countdownBar 3s linear forwards;
+    }
+
+    @keyframes countdownBar {
+      from { width: 100%; }
+      to { width: 0%; }
+    }
+
     .action-tag {
       margin-top: 4px;
       font-size: 8px;
@@ -292,6 +333,7 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 export class CardComponent {
   @Input() card: Card | null = null;
   @Input() isFaceUp: boolean = false;
+  @Input() isTemporarilyOpen: boolean = false;
   @Input() isSelectable: boolean = false;
   @Input() isSelected: boolean = false;
   @Input() isPeeked: boolean = false;
