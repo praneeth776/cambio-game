@@ -1,0 +1,13 @@
+<div class="app-layout" [attr.data-theme]="themeService.currentTheme().id">
+  <!-- TOP HEADER -->
+  <app-header (openRules)="showRulesModal = true"></app-header>
+
+  <!-- MAIN VIEW -->
+  <main class="main-content">
+    <app-lobby *ngIf="gameService.state().phase === 'LOBBY'"></app-lobby>
+    <app-arena *ngIf="gameService.state().phase !== 'LOBBY'"></app-arena>
+  </main>
+
+  <!-- RULES MODAL -->
+  <app-rules-modal *ngIf="showRulesModal" (close)="showRulesModal = false"></app-rules-modal>
+</div>
