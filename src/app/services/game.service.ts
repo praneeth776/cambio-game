@@ -601,7 +601,7 @@ export class GameService {
             logs: [...s.logs, {
               id: Math.random().toString(),
               timestamp: Date.now(),
-              message: `❌ SNAP FAILED! ${player.name} guessed wrong and drew a penalty chip!`,
+              message: `❌ SNAP PENALTY! ${player.name} slapped incorrectly and drew a penalty card (+1 card penalty)!`,
               type: 'danger'
             }]
           }));
@@ -1020,12 +1020,37 @@ export class GameService {
           const clickedCard = p.cards[action.slotIndex];
           if (clickedCard && clickedCard.rank === topDiscard.rank) {
             p.cards.splice(action.slotIndex, 1);
+            this.sound.playSnap();
             this.state.update(s => ({
               ...s,
               players,
-              discardPile: [...s.discardPile, clickedCard]
+              discardPile: [...s.discardPile, clickedCard],
+              logs: [...s.logs, {
+                id: Math.random().toString(),
+                timestamp: Date.now(),
+                message: `⚡ SNAP SUCCESS! ${p.name} matched rank ${topDiscard.label} and shed a card!`,
+                type: 'snap'
+              }]
             }));
             this.broadcastState();
+          } else {
+            this.sound.playActionPower();
+            const penaltyCard = this.canonicalDeck.pop();
+            if (penaltyCard) {
+              p.cards.push(penaltyCard);
+              this.state.update(s => ({
+                ...s,
+                players,
+                drawPileCount: this.canonicalDeck.length,
+                logs: [...s.logs, {
+                  id: Math.random().toString(),
+                  timestamp: Date.now(),
+                  message: `❌ SNAP PENALTY! ${p.name} slapped incorrectly and drew a penalty card (+1 card penalty)!`,
+                  type: 'danger'
+                }]
+              }));
+              this.broadcastState();
+            }
           }
         }
         break;

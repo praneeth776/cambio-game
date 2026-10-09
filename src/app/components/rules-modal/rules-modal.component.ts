@@ -24,12 +24,17 @@ import { ThemeService } from '../../services/theme.service';
           </section>
 
           <section class="rule-section">
-            <h3>🃏 CARD VALUES</h3>
+            <h3>🃏 CARD VALUES & SCORING</h3>
             <div class="values-grid">
               <div class="val-card best">
                 <span class="label">RED KING (♥ / ♦)</span>
+                <span class="pts">-1 PT</span>
+                <small>The best card in Cambio!</small>
+              </div>
+              <div class="val-card joker-card">
+                <span class="label">JOKER (🃏)</span>
                 <span class="pts">0 PTS</span>
-                <small>The ultimate card!</small>
+                <small>Zero points</small>
               </div>
               <div class="val-card">
                 <span class="label">ACE</span>
@@ -49,6 +54,9 @@ import { ThemeService } from '../../services/theme.service';
                 <small>Heavy penalty!</small>
               </div>
             </div>
+            <p class="memory-note">
+              🧠 <strong>Pure Memory:</strong> Cards close immediately after you confirm the starting peek. You must keep all cards in your head!
+            </p>
           </section>
 
           <section class="rule-section">
@@ -193,9 +201,24 @@ import { ThemeService } from '../../services/theme.service';
       color: var(--color-success);
     }
 
+    .val-card.joker-card {
+      border-color: var(--color-primary);
+      color: var(--color-primary);
+    }
+
     .val-card.worst {
       border-color: var(--color-danger);
       color: var(--color-danger);
+    }
+
+    .memory-note {
+      margin-top: 12px;
+      font-size: 12px;
+      background: rgba(0, 240, 255, 0.1);
+      border-left: 3px solid var(--color-primary);
+      padding: 8px 12px;
+      border-radius: 4px;
+      color: var(--color-text);
     }
 
     .val-card .label { font-size: 10px; font-weight: bold; }

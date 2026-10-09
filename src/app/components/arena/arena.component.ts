@@ -1,216 +1,251 @@
-import { Component } from '@angular/core';
+import { Component, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { CardComponent } from '../card/card.component';
 import { GameService } from '../../services/game.service';
 import { ThemeService } from '../../services/theme.service';
-import { Card, Player } from '../../models/game.models';
+import { Card, Player, GameLogEntry } from '../../models/game.models';
 
 @Component({
   selector: 'app-arena',
   standalone: true,
   imports: [CommonModule, CardComponent],
   template: `
-    <div class="arena-container">
+    <div class="arena-layout">
       
-      <!-- CAMBIO INITIATED ALERT BANNER -->
-      <div class="cambio-banner" *ngIf="gameService.state().cambioCallerId !== null">
-        <span class="siren">🚨</span>
-        <div class="banner-text">
-          <strong>{{ themeService.currentTheme().labels.cambioWarning }}</strong>
-          <span>FINAL TURNS REMAINING: {{ gameService.state().finalTurnsRemaining }}</span>
+      <!-- ============================================================== -->
+      <!-- MAIN ARENA TABLE AREA (LEFT & CENTER)                         -->
+      <!-- ============================================================== -->
+      <div class="arena-main">
+        
+        <!-- CAMBIO INITIATED ALERT BANNER -->
+        <div class="cambio-banner" *ngIf="gameService.state().cambioCallerId !== null">
+          <span class="siren">🚨</span>
+          <div class="banner-text">
+            <strong>{{ themeService.currentTheme().labels.cambioWarning }}</strong>
+            <span>FINAL TURNS REMAINING: {{ gameService.state().finalTurnsRemaining }}</span>
+          </div>
+          <span class="siren">🚨</span>
         </div>
-        <span class="siren">🚨</span>
-      </div>
 
-      <!-- ACTIVE ACTION DIRECTIVE PROMPT -->
-      <div class="directive-banner" *ngIf="gameService.state().activeAction as action">
-        <div class="directive-content">
-          <span class="directive-icon">⚡</span>
-          <span class="directive-text">{{ action.message }}</span>
-          <button 
-            *ngIf="action.sourcePlayerId === gameService.localPlayerId()" 
-            class="skip-btn" 
-            (click)="gameService.skipAction()">
-            SKIP POWER
-          </button>
+        <!-- ACTIVE ACTION DIRECTIVE PROMPT -->
+        <div class="directive-banner" *ngIf="gameService.state().activeAction as action">
+          <div class="directive-content">
+            <span class="directive-icon">⚡</span>
+            <span class="directive-text">{{ action.message }}</span>
+            <button 
+              *ngIf="action.sourcePlayerId === gameService.localPlayerId()" 
+              class="skip-btn" 
+              (click)="gameService.skipAction()">
+              SKIP POWER
+            </button>
+          </div>
         </div>
-      </div>
 
-      <!-- 1. OPPONENTS CARDS SECTION (RADIAL / HORIZONTAL GRID) -->
-      <div class="opponents-wrapper">
-        <div 
-          class="opponent-mat" 
-          *ngFor="let opp of gameService.otherPlayers()"
-          [class.active-turn]="opp.id === gameService.state().currentTurnPlayerId">
-          
-          <div class="opponent-hud">
-            <span class="opp-avatar">{{ opp.isBot ? '🤖' : '👤' }}</span>
-            <span class="opp-name">{{ opp.name }}</span>
-            <span class="turn-indicator" *ngIf="opp.id === gameService.state().currentTurnPlayerId">TURN</span>
+        <!-- 1. OPPONENTS CARDS SECTION (UP TO 7 OPPONENTS) -->
+        <div class="opponents-wrapper">
+          <div 
+            class="opponent-mat" 
+            *ngFor="let opp of gameService.otherPlayers()"
+            [class.active-turn]="opp.id === gameService.state().currentTurnPlayerId">
+            
+            <div class="opponent-hud">
+              <span class="opp-avatar">{{ opp.isBot ? '🤖' : '👤' }}</span>
+              <span class="opp-name">{{ opp.name }}</span>
+              <span class="opp-cards-badge">({{ opp.cards.length }} chips)</span>
+              <span class="turn-indicator" *ngIf="opp.id === gameService.state().currentTurnPlayerId">TURN</span>
+            </div>
+
+            <!-- Opponent Cards (CLOSED face-down during active game!) -->
+            <div class="opponent-cards-grid">
+              <div 
+                *ngFor="let c of opp.cards; let idx = index" 
+                class="opp-card-slot"
+                (click)="onCardClicked(opp.id, idx)">
+                <app-card 
+                  [card]="c" 
+                  [isFaceUp]="isCardFaceUp(opp.id, idx, c)"
+                  [isSelectable]="isCardSelectableForAction(opp.id, idx)"
+                  [slotIndex]="idx">
+                </app-card>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. CENTER TABLE: DRAW DECK, DISCARD PILE & DRAWN CARD HUD -->
+        <div class="center-table">
+          <div class="piles-wrapper">
+            
+            <!-- DRAW PILE -->
+            <div class="pile-container draw-pile" (click)="onDrawDeckClicked()">
+              <div class="pile-label">{{ themeService.currentTheme().labels.drawPile }}</div>
+              <div class="deck-stack" [class.can-draw]="canDrawFromDeck">
+                <div class="deck-card-layer layer-3"></div>
+                <div class="deck-card-layer layer-2"></div>
+                <div class="deck-card-layer layer-1">
+                  <app-card [isFaceUp]="false" [isSelectable]="canDrawFromDeck"></app-card>
+                </div>
+              </div>
+              <div class="pile-count">{{ gameService.state().drawPileCount }} left</div>
+            </div>
+
+            <!-- DISCARD PILE -->
+            <div class="pile-container discard-pile" (click)="onDrawDiscardClicked()">
+              <div class="pile-label">{{ themeService.currentTheme().labels.discardPile }}</div>
+              <div class="discard-stack" [class.can-draw]="canDrawFromDiscard">
+                <app-card 
+                  *ngIf="topDiscardCard" 
+                  [card]="topDiscardCard" 
+                  [isFaceUp]="true" 
+                  [isSelectable]="canDrawFromDiscard">
+                </app-card>
+                <div class="empty-discard" *ngIf="!topDiscardCard">
+                  <span>EMPTY CACHE</span>
+                </div>
+              </div>
+              <div class="pile-count">{{ gameService.state().discardPile.length }} chips</div>
+            </div>
+
           </div>
 
-          <div class="opponent-cards-grid">
+          <!-- DRAWN CARD ACTION MODAL / HUD -->
+          <div class="drawn-hud" *ngIf="gameService.state().drawnCard as drawn">
+            <div class="drawn-header">
+              <span class="drawn-tag">CURRENTLY HOLDING:</span>
+              <h3>{{ drawn.label }} of {{ drawn.suit }} ({{ drawn.pointValue }} pts)</h3>
+            </div>
+            
+            <div class="drawn-preview">
+              <app-card [card]="drawn" [isFaceUp]="true"></app-card>
+            </div>
+
+            <div class="drawn-actions">
+              <button class="drawn-btn discard" (click)="gameService.discardDrawnCard()">
+                🗑️ DISCARD DRAWN CARD
+                <small *ngIf="drawn.action !== 'NONE'">Activates {{ drawn.action }} power!</small>
+              </button>
+              <p class="swap-hint">OR: Click one of your face-down chips below to replace it!</p>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- 3. LOCAL PLAYER HAND (BOTTOM PROMINENT AREA) -->
+        <div class="local-player-area" *ngIf="gameService.localPlayer() as me" [class.my-turn]="gameService.isMyTurn()">
+          
+          <div class="local-hud">
+            <div class="hud-left">
+              <span class="my-avatar">👑</span>
+              <div>
+                <span class="my-name">{{ me.name }} (YOU) • {{ me.cards.length }} cards</span>
+                <span class="my-status" *ngIf="gameService.isMyTurn()">🟢 YOUR TURN</span>
+                <span class="my-status waiting" *ngIf="!gameService.isMyTurn()">⏳ WAITING FOR RIVALS</span>
+              </div>
+            </div>
+
+            <div class="hud-right">
+              <!-- CALL CAMBIO BUTTON -->
+              <button 
+                class="cambio-action-btn"
+                [disabled]="!gameService.isMyTurn() || gameService.state().drawnCard !== null || gameService.state().cambioCallerId !== null"
+                (click)="gameService.callCambio()">
+                ⚠️ {{ themeService.currentTheme().labels.cambioButton }}
+              </button>
+            </div>
+          </div>
+
+          <!-- CARDS GRID: CLOSED FACE DOWN DURING PLAYING! -->
+          <div class="my-cards-grid">
             <div 
-              *ngFor="let c of opp.cards; let idx = index" 
-              class="opp-card-slot"
-              (click)="onCardClicked(opp.id, idx)">
+              class="my-card-slot" 
+              *ngFor="let card of me.cards; let idx = index" 
+              (click)="onCardClicked(me.id, idx)">
+              
               <app-card 
-                [card]="c" 
-                [isFaceUp]="isCardKnown(c) || gameService.state().phase === 'GAME_OVER'"
-                [isSelectable]="isCardSelectableForAction(opp.id, idx)"
+                [card]="card" 
+                [isFaceUp]="isCardFaceUp(me.id, idx, card)"
+                [isSelectable]="isCardSelectableForAction(me.id, idx) || gameService.state().drawnCard !== null"
+                [isPeeked]="isCardCurrentlyPeeked(card)"
                 [slotIndex]="idx">
               </app-card>
+
+              <!-- QUICK SLAP BUTTON -->
+              <button 
+                class="snap-btn" 
+                *ngIf="gameService.state().phase === 'PLAYING'"
+                (click)="$event.stopPropagation(); gameService.snapCard(idx)"
+                title="Match rank with discard pile to shed this card! (Wrong guess = Penalty card)">
+                ⚡ SLAP
+              </button>
             </div>
           </div>
-        </div>
-      </div>
 
-      <!-- 2. CENTER TABLE: DRAW DECK, DISCARD PILE & DRAWN CARD HUD -->
-      <div class="center-table">
-        <div class="piles-wrapper">
-          
-          <!-- DRAW PILE -->
-          <div class="pile-container draw-pile" (click)="onDrawDeckClicked()">
-            <div class="pile-label">{{ themeService.currentTheme().labels.drawPile }}</div>
-            <div class="deck-stack" [class.can-draw]="canDrawFromDeck">
-              <div class="deck-card-layer layer-3"></div>
-              <div class="deck-card-layer layer-2"></div>
-              <div class="deck-card-layer layer-1">
-                <app-card [isFaceUp]="false" [isSelectable]="canDrawFromDeck"></app-card>
-              </div>
-            </div>
-            <div class="pile-count">{{ gameService.state().drawPileCount }} left</div>
-          </div>
-
-          <!-- DISCARD PILE -->
-          <div class="pile-container discard-pile" (click)="onDrawDiscardClicked()">
-            <div class="pile-label">{{ themeService.currentTheme().labels.discardPile }}</div>
-            <div class="discard-stack" [class.can-draw]="canDrawFromDiscard">
-              <app-card 
-                *ngIf="topDiscardCard" 
-                [card]="topDiscardCard" 
-                [isFaceUp]="true" 
-                [isSelectable]="canDrawFromDiscard">
-              </app-card>
-              <div class="empty-discard" *ngIf="!topDiscardCard">
-                <span>EMPTY CACHE</span>
-              </div>
-            </div>
-            <div class="pile-count">{{ gameService.state().discardPile.length }} chips</div>
-          </div>
-
-        </div>
-
-        <!-- DRAWN CARD ACTION MODAL / HUD -->
-        <div class="drawn-hud" *ngIf="gameService.state().drawnCard as drawn">
-          <div class="drawn-header">
-            <span class="drawn-tag">CURRENTLY HOLDING:</span>
-            <h3>{{ drawn.label }} of {{ drawn.suit }} ({{ drawn.pointValue }} pts)</h3>
-          </div>
-          
-          <div class="drawn-preview">
-            <app-card [card]="drawn" [isFaceUp]="true"></app-card>
-          </div>
-
-          <div class="drawn-actions">
-            <button class="drawn-btn discard" (click)="gameService.discardDrawnCard()">
-              🗑️ DISCARD DRAWN CARD
-              <small *ngIf="drawn.action !== 'NONE'">Activates {{ drawn.action }} power!</small>
+          <!-- INITIAL PEEK CONFIRMATION BAR -->
+          <div class="initial-peek-bar" *ngIf="gameService.state().phase === 'INITIAL_PEEK' && !me.hasPeekedInitial">
+            <p class="peek-instruction">
+              👁️ {{ themeService.currentTheme().labels.initialPeekPrompt }} (bottom row #3 & #4 are revealed).
+            </p>
+            <p class="peek-memory-warning">
+              ⚠️ Once you click Proceed, <strong>ALL CARDS WILL CLOSE</strong>! You must rely purely on your memory.
+            </p>
+            <button class="confirm-peek-btn" (click)="gameService.confirmInitialPeek()">
+              I'VE MEMORIZED MY CHIPS (CLOSE & START)
             </button>
-            <p class="swap-hint">OR: Click one of your cards below to replace it!</p>
           </div>
+
         </div>
 
       </div>
 
-      <!-- 3. LOCAL PLAYER HAND (BOTTOM PROMINENT AREA) -->
-      <div class="local-player-area" *ngIf="gameService.localPlayer() as me" [class.my-turn]="gameService.isMyTurn()">
-        
-        <div class="local-hud">
-          <div class="hud-left">
-            <span class="my-avatar">👑</span>
-            <div>
-              <span class="my-name">{{ me.name }} (YOU)</span>
-              <span class="my-status" *ngIf="gameService.isMyTurn()">🟢 YOUR TURN</span>
-              <span class="my-status waiting" *ngIf="!gameService.isMyTurn()">⏳ WAITING FOR OPPONENTS</span>
-            </div>
+      <!-- ============================================================== -->
+      <!-- RIGHT SIDEBAR: REAL-TIME UPDATES & ACTION FEED                -->
+      <!-- ============================================================== -->
+      <aside class="updates-sidebar">
+        <div class="sidebar-header">
+          <div class="sidebar-title">
+            <span class="live-pulse-dot"></span>
+            <span>LIVE UPDATES</span>
           </div>
-
-          <div class="hud-right">
-            <!-- CALL CAMBIO BUTTON -->
-            <button 
-              class="cambio-action-btn"
-              [disabled]="!gameService.isMyTurn() || gameService.state().drawnCard !== null || gameService.state().cambioCallerId !== null"
-              (click)="gameService.callCambio()">
-              ⚠️ {{ themeService.currentTheme().labels.cambioButton }}
-            </button>
-          </div>
+          <span class="event-badge">{{ gameService.state().logs.length }}</span>
         </div>
 
-        <!-- 4 CARDS (2x2 GRID) -->
-        <div class="my-cards-grid">
+        <div class="updates-feed">
           <div 
-            class="my-card-slot" 
-            *ngFor="let card of me.cards; let idx = index" 
-            (click)="onCardClicked(me.id, idx)">
+            class="update-item" 
+            *ngFor="let log of reversedLogs()" 
+            [class]="'log-' + log.type">
             
-            <app-card 
-              [card]="card" 
-              [isFaceUp]="isCardKnown(card) || isInitialPeekCard(idx) || gameService.state().phase === 'GAME_OVER'"
-              [isSelectable]="isCardSelectableForAction(me.id, idx) || gameService.state().drawnCard !== null"
-              [isPeeked]="isCardCurrentlyPeeked(card)"
-              [slotIndex]="idx">
-            </app-card>
+            <div class="update-meta">
+              <span class="log-badge">{{ getLogBadge(log.type) }}</span>
+              <span class="update-time">{{ log.timestamp | date:'HH:mm:ss' }}</span>
+            </div>
 
-            <!-- QUICK SLAP BUTTON -->
-            <button 
-              class="snap-btn" 
-              *ngIf="gameService.state().phase === 'PLAYING'"
-              (click)="$event.stopPropagation(); gameService.snapCard(idx)"
-              title="Match rank with discard pile to shed this card!">
-              ⚡ SLAP
-            </button>
+            <div class="update-message">
+              {{ log.message }}
+            </div>
+          </div>
+
+          <div class="empty-feed" *ngIf="gameService.state().logs.length === 0">
+            <span>Waiting for match actions...</span>
           </div>
         </div>
-
-        <!-- INITIAL PEEK CONFIRMATION BAR -->
-        <div class="initial-peek-bar" *ngIf="gameService.state().phase === 'INITIAL_PEEK' && !me.hasPeekedInitial">
-          <p class="peek-instruction">
-            👁️ {{ themeService.currentTheme().labels.initialPeekPrompt }} (bottom row #3 & #4 are revealed).
-          </p>
-          <button class="confirm-peek-btn" (click)="gameService.confirmInitialPeek()">
-            I'VE MEMORIZED MY CARDS (PROCEED)
-          </button>
-        </div>
-
-      </div>
+      </aside>
 
       <!-- TEMPORARY PEEK HUD OVERLAY (When peeking a card via 7/8/9/10) -->
       <div class="peek-overlay" *ngIf="gameService.activePeek() as peek">
         <div class="peek-card-modal">
-          <div class="peek-badge">👁️ ACTIVE SCAN // PEEK SUCCESS</div>
+          <div class="peek-badge">👁️ TEMPORARY PEEK // MEMORIZE QUICKLY</div>
           <h4>{{ peek.ownerName }}'s Card #{{ peek.slotIndex + 1 }}</h4>
           <app-card [card]="peek.card" [isFaceUp]="true"></app-card>
-          <div class="peek-timer">Closing in 3s...</div>
+          <div class="peek-timer">Closing back face-down in 3s...</div>
         </div>
       </div>
 
-      <!-- 4. ACTIVITY LOG / TICKER -->
-      <div class="activity-log-toggle" (click)="showLog = !showLog">
-        📜 LOG ({{ gameService.state().logs.length }}) {{ showLog ? '▼' : '▲' }}
-      </div>
-      <div class="activity-log" *ngIf="showLog">
-        <div class="log-entry" *ngFor="let log of gameService.state().logs.slice().reverse()">
-          <span class="log-time">{{ log.timestamp | date:'HH:mm:ss' }}</span>
-          <span class="log-msg" [class]="log.type">{{ log.message }}</span>
-        </div>
-      </div>
-
-      <!-- 5. GAME OVER SUMMARY MODAL -->
+      <!-- GAME OVER SUMMARY MODAL -->
       <div class="game-over-modal" *ngIf="gameService.state().phase === 'GAME_OVER'">
         <div class="game-over-content">
           <h2 class="victory-title">🏆 {{ themeService.currentTheme().labels.victoryTitle }}</h2>
-          <p class="victory-subtitle">All memory chips decrypted. Final score tallies:</p>
+          <p class="victory-subtitle">All cards flipped face-up! Final scores:</p>
 
           <div class="scores-table">
             <div 
@@ -235,21 +270,210 @@ import { Card, Player } from '../../models/game.models';
     </div>
   `,
   styles: [`
-    .arena-container {
+    .arena-layout {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      padding: 16px;
+      min-height: calc(100vh - 80px);
+      background: var(--color-bg-gradient);
+      box-sizing: border-box;
+      max-width: 1440px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    @media (min-width: 1024px) {
+      .arena-layout {
+        flex-direction: row;
+        align-items: flex-start;
+      }
+    }
+
+    /* MAIN TABLE COLUMN */
+    .arena-main {
+      flex: 1;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 16px;
       gap: 20px;
-      min-height: calc(100vh - 80px);
-      position: relative;
-      background: var(--color-bg-gradient);
+      min-width: 0;
+      width: 100%;
+    }
+
+    /* RIGHT UPDATES SIDEBAR */
+    .updates-sidebar {
+      width: 100%;
+      background: var(--color-surface, #111422);
+      border: 2px solid var(--color-border, #1f2945);
+      border-radius: 14px;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+      overflow: hidden;
+      max-height: 400px;
+    }
+
+    @media (min-width: 1024px) {
+      .updates-sidebar {
+        width: 320px;
+        min-width: 300px;
+        position: sticky;
+        top: 80px;
+        max-height: calc(100vh - 100px);
+      }
+    }
+
+    .sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: var(--color-surface-elevated, #1a1f35);
+      border-bottom: 1px solid var(--color-border);
+      font-family: var(--font-main);
+    }
+
+    .sidebar-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 900;
+      color: var(--color-primary);
+      letter-spacing: 1px;
+    }
+
+    .live-pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--color-primary);
+      box-shadow: 0 0 8px var(--color-primary);
+      animation: pulseDot 1.4s infinite ease-in-out;
+    }
+
+    @keyframes pulseDot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.8); }
+    }
+
+    .event-badge {
+      background: rgba(0, 0, 0, 0.4);
+      color: var(--color-text-muted);
+      font-size: 11px;
+      font-weight: bold;
+      padding: 2px 7px;
+      border-radius: 10px;
+      border: 1px solid var(--color-border);
+    }
+
+    .updates-feed {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      font-family: var(--font-main);
+    }
+
+    .update-item {
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.35);
+      border-left: 3px solid var(--color-border);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      transition: all 0.2s;
+      animation: slideIn 0.25s ease;
+    }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(-6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .update-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .log-badge {
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: 0.5px;
+      padding: 2px 5px;
+      border-radius: 3px;
+      text-transform: uppercase;
+    }
+
+    .update-time {
+      font-size: 10px;
+      color: var(--color-text-dim);
+    }
+
+    .update-message {
+      font-size: 12px;
+      color: var(--color-text);
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    /* Log Type Highlights */
+    .update-item.log-danger {
+      border-left-color: var(--color-danger);
+      background: rgba(255, 23, 68, 0.12);
+    }
+    .update-item.log-danger .log-badge {
+      background: var(--color-danger);
+      color: #fff;
+    }
+
+    .update-item.log-snap {
+      border-left-color: var(--color-success);
+      background: rgba(0, 230, 118, 0.1);
+    }
+    .update-item.log-snap .log-badge {
+      background: var(--color-success);
+      color: #0b0f19;
+    }
+
+    .update-item.log-cambio {
+      border-left-color: var(--color-secondary);
+      background: rgba(255, 0, 85, 0.15);
+      border-left-width: 4px;
+    }
+    .update-item.log-cambio .log-badge {
+      background: var(--color-secondary);
+      color: #fff;
+    }
+
+    .update-item.log-action {
+      border-left-color: var(--color-primary);
+    }
+    .update-item.log-action .log-badge {
+      background: rgba(0, 240, 255, 0.2);
+      color: var(--color-primary);
+    }
+
+    .update-item.log-info .log-badge {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--color-text-muted);
+    }
+
+    .empty-feed {
+      text-align: center;
+      padding: 24px;
+      font-size: 12px;
+      color: var(--color-text-muted);
     }
 
     /* CAMBIO ALERT BANNER */
     .cambio-banner {
       width: 100%;
-      max-width: 900px;
       background: linear-gradient(90deg, #ff0055 0%, #ff5252 50%, #ff0055 100%);
       color: #fff;
       display: flex;
@@ -284,7 +508,6 @@ import { Card, Player } from '../../models/game.models';
     /* DIRECTIVE BANNER */
     .directive-banner {
       width: 100%;
-      max-width: 900px;
       background: rgba(0, 240, 255, 0.15);
       border: 1px solid var(--color-primary);
       border-radius: 8px;
@@ -328,9 +551,8 @@ import { Card, Player } from '../../models/game.models';
       display: flex;
       flex-wrap: wrap;
       justify-content: center;
-      gap: 16px;
+      gap: 14px;
       width: 100%;
-      max-width: 1200px;
     }
 
     .opponent-mat {
@@ -343,7 +565,7 @@ import { Card, Player } from '../../models/game.models';
       align-items: center;
       gap: 8px;
       transition: all 0.25s ease;
-      min-width: 180px;
+      min-width: 170px;
     }
 
     .opponent-mat.active-turn {
@@ -360,6 +582,11 @@ import { Card, Player } from '../../models/game.models';
       font-weight: bold;
       color: var(--color-text);
       font-family: var(--font-main);
+    }
+
+    .opp-cards-badge {
+      font-size: 10px;
+      color: var(--color-text-muted);
     }
 
     .turn-indicator {
@@ -664,7 +891,14 @@ import { Card, Player } from '../../models/game.models';
     .peek-instruction {
       font-size: 12px;
       color: var(--color-accent);
-      margin: 0 0 8px 0;
+      margin: 0 0 4px 0;
+      font-family: var(--font-main);
+    }
+
+    .peek-memory-warning {
+      font-size: 11px;
+      color: var(--color-warning);
+      margin: 0 0 10px 0;
       font-family: var(--font-main);
     }
 
@@ -672,12 +906,13 @@ import { Card, Player } from '../../models/game.models';
       background: var(--color-accent);
       color: #0b0f19;
       border: none;
-      padding: 8px 18px;
+      padding: 10px 22px;
       border-radius: 6px;
       font-weight: 900;
       font-size: 12px;
       cursor: pointer;
       font-family: var(--font-main);
+      box-shadow: 0 0 15px rgba(255, 230, 0, 0.35);
     }
 
     /* PEEK OVERLAY */
@@ -687,7 +922,7 @@ import { Card, Player } from '../../models/game.models';
       left: 0;
       width: 100vw;
       height: 100vh;
-      background: rgba(0, 0, 0, 0.8);
+      background: rgba(0, 0, 0, 0.85);
       backdrop-filter: blur(4px);
       z-index: 1000;
       display: flex;
@@ -718,57 +953,9 @@ import { Card, Player } from '../../models/game.models';
 
     .peek-timer {
       font-size: 11px;
-      color: var(--color-text-muted);
-    }
-
-    /* LOG / TICKER */
-    .activity-log-toggle {
-      position: fixed;
-      bottom: 12px;
-      left: 16px;
-      background: var(--color-surface-elevated);
-      border: 1px solid var(--color-border);
-      color: var(--color-text-muted);
-      font-size: 11px;
+      color: var(--color-accent);
       font-weight: bold;
-      padding: 6px 12px;
-      border-radius: 8px;
-      cursor: pointer;
-      font-family: var(--font-main);
-      z-index: 50;
     }
-
-    .activity-log {
-      position: fixed;
-      bottom: 48px;
-      left: 16px;
-      width: 320px;
-      max-height: 220px;
-      overflow-y: auto;
-      background: rgba(17, 20, 34, 0.95);
-      border: 1px solid var(--color-border);
-      border-radius: 8px;
-      padding: 10px;
-      font-family: var(--font-main);
-      font-size: 11px;
-      z-index: 50;
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
-    }
-
-    .log-entry {
-      display: flex;
-      gap: 6px;
-      margin-bottom: 4px;
-    }
-
-    .log-time {
-      color: var(--color-text-dim);
-    }
-
-    .log-msg.action { color: var(--color-primary); }
-    .log-msg.cambio { color: var(--color-accent); font-weight: bold; }
-    .log-msg.snap { color: var(--color-success); font-weight: bold; }
-    .log-msg.danger { color: var(--color-danger); }
 
     /* GAME OVER MODAL */
     .game-over-modal {
@@ -862,12 +1049,26 @@ import { Card, Player } from '../../models/game.models';
   `]
 })
 export class ArenaComponent {
-  showLog = false;
-
   constructor(
     public gameService: GameService,
     public themeService: ThemeService
   ) {}
+
+  reversedLogs(): GameLogEntry[] {
+    return this.gameService.state().logs.slice().reverse();
+  }
+
+  getLogBadge(type: GameLogEntry['type']): string {
+    switch (type) {
+      case 'danger': return '⚠️ PENALTY';
+      case 'snap': return '⚡ MATCH';
+      case 'cambio': return '🚨 CAMBIO';
+      case 'action': return '🎮 ACTION';
+      case 'warning': return '⚠️ ALERT';
+      case 'info':
+      default: return 'ℹ️ SYSTEM';
+    }
+  }
 
   get topDiscardCard(): Card | null {
     const discard = this.gameService.state().discardPile;
@@ -908,12 +1109,26 @@ export class ArenaComponent {
     }
   }
 
-  isCardKnown(card: Card): boolean {
-    return !!this.gameService.knownCards()[card.id];
-  }
+  /**
+   * PURE MEMORY RULE:
+   * Cards are ONLY face-up:
+   * 1. At GAME_OVER (all revealed).
+   * 2. During INITIAL_PEEK phase, local player's bottom 2 cards (#3 and #4) are face up for memorization.
+   * 3. IN ALL OTHER MOMENTS (PLAYING, active turns), ALL CARDS ARE CLOSED / FACE DOWN!
+   */
+  isCardFaceUp(playerId: string, slotIndex: number, card: Card): boolean {
+    const phase = this.gameService.state().phase;
+    
+    // 1. All revealed at GAME_OVER
+    if (phase === 'GAME_OVER') return true;
 
-  isInitialPeekCard(slotIndex: number): boolean {
-    return this.gameService.state().phase === 'INITIAL_PEEK' && (slotIndex === 2 || slotIndex === 3);
+    // 2. Only during INITIAL_PEEK for the local player's bottom 2 cards
+    if (phase === 'INITIAL_PEEK' && playerId === this.gameService.localPlayerId() && (slotIndex === 2 || slotIndex === 3)) {
+      return true;
+    }
+
+    // 3. During PLAYING phase, all cards are CLOSED!
+    return false;
   }
 
   isCardCurrentlyPeeked(card: Card): boolean {

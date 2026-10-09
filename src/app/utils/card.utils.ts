@@ -29,8 +29,8 @@ export function createDeck(deckIdPrefix: string = 'd1'): Card[] {
         action = 'SWAP';
       } else if (rank === 13) {
         label = 'K';
-        // Classic Cambio rule: Red Kings are 0 points, Black Kings are 13 points!
-        pointValue = isRed ? 0 : 13;
+        // Red Kings are -1 point, Black Kings are 13 points!
+        pointValue = isRed ? -1 : 13;
       }
 
       cards.push({
@@ -43,6 +43,19 @@ export function createDeck(deckIdPrefix: string = 'd1'): Card[] {
         isRed
       });
     }
+  }
+
+  // 2 Jokers (0 points each)
+  for (let j = 1; j <= 2; j++) {
+    cards.push({
+      id: `${deckIdPrefix}-joker-${j}-${Math.random().toString(36).substring(2, 6)}`,
+      suit: 'joker',
+      rank: 0,
+      label: 'JKR',
+      pointValue: 0,
+      action: 'NONE',
+      isRed: j === 1
+    });
   }
 
   return cards;
@@ -63,5 +76,6 @@ export function getSuitSymbol(suit: Suit): string {
     case 'diamonds': return '♦';
     case 'clubs': return '♣';
     case 'spades': return '♠';
+    case 'joker': return '🃏';
   }
 }

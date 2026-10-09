@@ -48,8 +48,11 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
             <div class="action-tag" *ngIf="card.action === 'SWAP'">
               🔀 {{ themeService.currentTheme().labels.actions.blindSwap }}
             </div>
-            <div class="action-tag zero-pts" *ngIf="card.rank === 13 && card.isRed">
-              ★ ZERO PTS ★
+            <div class="action-tag best-pts" *ngIf="card.rank === 13 && card.isRed">
+              ★ RED KING: -1 PT ★
+            </div>
+            <div class="action-tag zero-pts" *ngIf="card.suit === 'joker'">
+              ★ JOKER: 0 PTS ★
             </div>
             <div class="action-tag penalty" *ngIf="card.rank === 13 && !card.isRed">
               ⚠️ 13 PTS
@@ -62,7 +65,7 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
           </div>
 
           <div class="point-badge">
-            {{ card.pointValue }} {{ card.pointValue === 1 ? 'pt' : 'pts' }}
+            {{ card.pointValue }} {{ (card.pointValue === 1 || card.pointValue === -1) ? 'pt' : 'pts' }}
           </div>
         </div>
       </div>
@@ -253,10 +256,17 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
       text-overflow: ellipsis;
     }
 
-    .action-tag.zero-pts {
-      background: rgba(0, 230, 118, 0.2);
+    .action-tag.best-pts {
+      background: rgba(0, 230, 118, 0.25);
       border-color: #00e676;
       color: #00e676;
+      box-shadow: 0 0 6px rgba(0, 230, 118, 0.4);
+    }
+
+    .action-tag.zero-pts {
+      background: rgba(0, 240, 255, 0.2);
+      border-color: #00f0ff;
+      color: #00f0ff;
     }
 
     .action-tag.penalty {
@@ -302,6 +312,7 @@ export class CardComponent {
       case 'diamonds': return '♦';
       case 'clubs': return '♣';
       case 'spades': return '♠';
+      case 'joker': return '🃏';
     }
   }
 

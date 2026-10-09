@@ -1,4 +1,4 @@
-export type Suit = 'hearts' | 'diamonds' | 'clubs' | 'spades';
+export type Suit = 'hearts' | 'diamonds' | 'clubs' | 'spades' | 'joker';
 
 export type CardActionType = 'NONE' | 'PEEK_OWN' | 'PEEK_OTHER' | 'SWAP';
 
