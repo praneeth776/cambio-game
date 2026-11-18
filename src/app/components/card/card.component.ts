@@ -12,10 +12,11 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
     <div 
       class="card-wrapper" 
       [class.face-up]="isFaceUp" 
-      [class.selectable]="isSelectable"
+      [class.selectable]="isSelectable && !disabled && !isFrozen"
       [class.selected]="isSelected"
       [class.active-peek]="isPeeked"
-      [class.disabled]="disabled"
+      [class.frozen]="isFrozen"
+      [class.disabled]="disabled || isFrozen"
       (click)="onCardClick()">
       
       <div class="card-inner">
@@ -24,6 +25,9 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
           <div class="card-back-art" [innerHTML]="sanitizedBackSvg"></div>
           <div class="card-back-overlay">
             <span class="slot-badge" *ngIf="slotIndex !== undefined">#{{ slotIndex + 1 }}</span>
+          </div>
+          <div class="frozen-lock-overlay" *ngIf="isFrozen">
+            <span>❄️</span>
           </div>
         </div>
 
@@ -188,6 +192,24 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
       font-family: var(--font-main);
     }
 
+    .frozen-lock-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(120, 210, 255, 0.18);
+      backdrop-filter: blur(1px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      z-index: 3;
+      pointer-events: none;
+    }
+
+    .card-wrapper.frozen .card-back {
+      border-color: #7dd3fc;
+      box-shadow: inset 0 0 14px rgba(125, 211, 252, 0.35);
+    }
+
     /* FRONT FACE */
     .card-front {
       background: var(--card-front-bg, #121727);
@@ -337,6 +359,7 @@ export class CardComponent {
   @Input() isSelectable: boolean = false;
   @Input() isSelected: boolean = false;
   @Input() isPeeked: boolean = false;
+  @Input() isFrozen: boolean = false;
   @Input() disabled: boolean = false;
   @Input() slotIndex?: number;
 
@@ -359,7 +382,7 @@ export class CardComponent {
   }
 
   onCardClick(): void {
-    if (this.disabled) return;
+    if (this.disabled || this.isFrozen) return;
     this.cardClicked.emit(this.slotIndex);
   }
 }

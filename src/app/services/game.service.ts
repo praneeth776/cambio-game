@@ -1,11 +1,11 @@
 import { Injectable, signal, computed } from '@angular/core';
-import { Card, Player, GameState, ActiveAction, GameLogEntry, GamePhase } from '../models/game.models';
-import { createDeck, shuffleDeck } from '../utils/card.utils';
+import { Card, Player, GameState, GameLogEntry } from '../models/game.models';
+import { createDeck, shuffleDeck, getSuitSymbol } from '../utils/card.utils';
 import { SoundService } from './sound.service';
 import confetti from 'canvas-confetti';
 // Trystero import for zero-server WebRTC peer connections
 // @ts-ignore
-import { joinRoom, selfId } from 'trystero/nostr';
+import { joinRoom } from 'trystero/nostr';
 
 const APP_ID = 'cambio-p2p-v1';
 
@@ -24,21 +24,23 @@ export class GameService {
     players: [],
     currentTurnPlayerId: '',
     cambioCallerId: null,
+    frozenPlayerIds: [],
     finalTurnsRemaining: 0,
-    drawPileCount: 52,
+    drawPileCount: 54,
     discardPile: [],
     drawnCard: null,
+    drawnSource: null,
     activeAction: null,
     logs: []
   });
 
-  // Set of cards temporarily revealed for 3 seconds with a timer
+  // Set of cards temporarily revealed for 3 seconds with an expiration timestamp
   readonly temporarilyOpenCards = signal<Record<string, number>>({});
 
-  // Local card knowledge map (cardId -> boolean or Card for revealed peeks)
+  // Local card knowledge map (used for game-over reveal / internal tracking)
   readonly knownCards = signal<Record<string, Card>>({});
 
-  // Temporary peek overlay (e.g. while peeking a card for 3 seconds)
+  // Temporary peek overlay (legacy fallback if needed)
   readonly activePeek = signal<{ card: Card; ownerName: string; slotIndex: number; expiresAt: number } | null>(null);
 
   // Private canonical deck kept by the Room Host
@@ -48,8 +50,9 @@ export class GameService {
   private p2pRoom: any = null;
   private sendSyncState: any = null;
   private sendPlayerAction: any = null;
-  private sendPrivatePeek: any = null;
   private sendSyncReveal: any = null;
+  private peerToPlayerId = new Map<string, string>();
+  private hasAnnouncedJoin = false;
 
   // Computed signals
   readonly isHost = computed(() => {
@@ -59,7 +62,12 @@ export class GameService {
   });
 
   readonly isMyTurn = computed(() => {
-    return this.state().phase === 'PLAYING' && this.state().currentTurnPlayerId === this.localPlayerId();
+    const s = this.state();
+    return (
+      s.phase === 'PLAYING' &&
+      s.currentTurnPlayerId === this.localPlayerId() &&
+      !s.frozenPlayerIds.includes(this.localPlayerId())
+    );
   });
 
   readonly localPlayer = computed(() => {
@@ -70,12 +78,26 @@ export class GameService {
     return this.state().players.filter(x => x.id !== this.localPlayerId());
   });
 
+  readonly isLocalFrozen = computed(() => {
+    return this.state().frozenPlayerIds.includes(this.localPlayerId());
+  });
+
   constructor(private sound: SoundService) {}
+
+  isPlayerFrozen(playerId: string): boolean {
+    return this.state().frozenPlayerIds.includes(playerId);
+  }
+
+  private formatCardTag(card: Card): string {
+    if (card.suit === 'joker') return 'JKR🃏';
+    return `${card.label}${getSuitSymbol(card.suit)}`;
+  }
 
   // -------------------------------------------------------------
   // LOBBY & ROOM INITIALIZATION
   // -------------------------------------------------------------
   createRoom(customCode?: string): string {
+    this.cleanupP2P();
     const code = customCode ? customCode.toUpperCase() : Math.random().toString(36).substring(2, 6).toUpperCase();
     const host: Player = {
       id: this.localPlayerId(),
@@ -89,17 +111,18 @@ export class GameService {
       score: 0
     };
 
-    this.state.update(s => ({
-      ...s,
+    this.state.set({
       roomCode: code,
       phase: 'LOBBY',
       players: [host],
       currentTurnPlayerId: host.id,
       cambioCallerId: null,
+      frozenPlayerIds: [],
       finalTurnsRemaining: 0,
-      drawPileCount: 52,
+      drawPileCount: 54,
       discardPile: [],
       drawnCard: null,
+      drawnSource: null,
       activeAction: null,
       logs: [{
         id: Math.random().toString(),
@@ -107,16 +130,19 @@ export class GameService {
         message: `Grid initialized. Room code: [${code}]`,
         type: 'info'
       }]
-    }));
+    });
 
-    this.initP2P(code);
+    this.initP2P(code, true);
     return code;
   }
 
   joinRoom(code: string, playerName?: string): void {
+    this.cleanupP2P();
     const roomCode = code.toUpperCase().trim();
-    if (playerName) {
-      this.localPlayerName.set(playerName);
+    if (!roomCode) return;
+
+    if (playerName && playerName.trim()) {
+      this.localPlayerName.set(playerName.trim());
     }
 
     const localPlayer: Player = {
@@ -131,19 +157,83 @@ export class GameService {
       score: 0
     };
 
-    this.state.update(s => ({
-      ...s,
+    this.state.set({
       roomCode,
+      phase: 'LOBBY',
       players: [localPlayer],
+      currentTurnPlayerId: '',
+      cambioCallerId: null,
+      frozenPlayerIds: [],
+      finalTurnsRemaining: 0,
+      drawPileCount: 54,
+      discardPile: [],
+      drawnCard: null,
+      drawnSource: null,
+      activeAction: null,
       logs: [{
         id: Math.random().toString(),
         timestamp: Date.now(),
         message: `Connecting to room [${roomCode}]...`,
         type: 'info'
       }]
-    }));
+    });
 
-    this.initP2P(roomCode);
+    this.initP2P(roomCode, false);
+  }
+
+  leaveRoom(): void {
+    this.cleanupP2P();
+    this.temporarilyOpenCards.set({});
+    this.knownCards.set({});
+    this.activePeek.set(null);
+    this.canonicalDeck = [];
+
+    this.state.set({
+      roomCode: '',
+      phase: 'LOBBY',
+      players: [],
+      currentTurnPlayerId: '',
+      cambioCallerId: null,
+      frozenPlayerIds: [],
+      finalTurnsRemaining: 0,
+      drawPileCount: 54,
+      discardPile: [],
+      drawnCard: null,
+      drawnSource: null,
+      activeAction: null,
+      logs: []
+    });
+
+    if (typeof window !== 'undefined' && window.location.search.includes('room=')) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('room');
+      window.history.replaceState({}, '', url.toString());
+    }
+  }
+
+  updateLocalName(newName: string): void {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    this.localPlayerName.set(trimmed);
+
+    const s = this.state();
+    if (!s.roomCode) return;
+
+    if (this.isHost()) {
+      this.state.update(curr => ({
+        ...curr,
+        players: curr.players.map(p =>
+          p.id === this.localPlayerId() ? { ...p, name: trimmed } : p
+        )
+      }));
+      this.broadcastState();
+    } else {
+      this.sendPlayerAction?.({
+        type: 'UPDATE_NAME',
+        playerId: this.localPlayerId(),
+        name: trimmed
+      });
+    }
   }
 
   addBotPlayer(): void {
@@ -154,7 +244,7 @@ export class GameService {
       return;
     }
 
-    const botIndex = current.length;
+    const botIndex = current.filter(p => p.isBot).length;
     const botNames = ['K-Vex', 'ZeroCool', 'Nyx-9', 'Phantom', 'Cipher', 'Vortex', 'Apex'];
     const botName = botNames[botIndex % botNames.length] + ' [AI]';
 
@@ -187,24 +277,63 @@ export class GameService {
     this.broadcastState();
   }
 
+  returnToLobby(): void {
+    if (!this.isHost()) {
+      this.leaveRoom();
+      return;
+    }
+    this.temporarilyOpenCards.set({});
+    this.knownCards.set({});
+    this.activePeek.set(null);
+    this.canonicalDeck = [];
+
+    this.state.update(s => ({
+      ...s,
+      phase: 'LOBBY',
+      players: s.players.map(p => ({ ...p, cards: [], hasPeekedInitial: p.isBot, score: 0 })),
+      currentTurnPlayerId: s.players[0]?.id || '',
+      cambioCallerId: null,
+      frozenPlayerIds: [],
+      finalTurnsRemaining: 0,
+      drawPileCount: 54,
+      discardPile: [],
+      drawnCard: null,
+      drawnSource: null,
+      activeAction: null,
+      logs: [{
+        id: Math.random().toString(),
+        timestamp: Date.now(),
+        message: 'Returned to lobby for next match.',
+        type: 'info'
+      }]
+    }));
+    this.broadcastState();
+  }
+
   // -------------------------------------------------------------
   // START GAME & INITIAL PEEK
   // -------------------------------------------------------------
   startGame(): void {
     if (!this.isHost()) return;
-    const players = [...this.state().players];
+    const players = this.state().players.map(p => ({ ...p }));
     if (players.length < 2) {
       this.addLog('Need at least 2 players to start! Add AI bots or invite friends.', 'danger');
       return;
     }
 
-    // Prepare fresh deck
-    const deck = shuffleDeck(createDeck('r1'));
-    
+    // Reset transient local caches
+    this.temporarilyOpenCards.set({});
+    this.knownCards.set({});
+    this.activePeek.set(null);
+
+    // Prepare fresh 54-card deck (52 + 2 Jokers)
+    const deck = shuffleDeck(createDeck(`r_${Date.now().toString(36)}`));
+
     // Deal 4 cards to each player
     players.forEach(p => {
       p.cards = deck.splice(0, 4);
-      p.hasPeekedInitial = p.isBot; // bots automatically peek
+      p.hasPeekedInitial = p.isBot; // bots automatically memorize
+      p.score = 0;
     });
 
     // Top card of deck starts the discard pile
@@ -217,44 +346,31 @@ export class GameService {
       players,
       currentTurnPlayerId: players[0].id,
       cambioCallerId: null,
+      frozenPlayerIds: [],
       finalTurnsRemaining: 0,
       drawPileCount: this.canonicalDeck.length,
       discardPile: [initialDiscard],
       drawnCard: null,
+      drawnSource: null,
       activeAction: null,
       logs: [{
         id: Math.random().toString(),
         timestamp: Date.now(),
-        message: 'Game started! Memorize 2 of your cards (bottom row).',
+        message: 'Match initialized! Memorize your bottom 2 chips (#3 & #4).',
         type: 'info'
       }]
     }));
 
     this.sound.playActionPower();
     this.broadcastState();
-
-    // Store knowledge of local player's initial 2 cards (indices 2 and 3)
-    const myPlayer = players.find(p => p.id === this.localPlayerId());
-    if (myPlayer && myPlayer.cards.length >= 4) {
-      this.knownCards.update(k => ({
-        ...k,
-        [myPlayer.cards[2].id]: myPlayer.cards[2],
-        [myPlayer.cards[3].id]: myPlayer.cards[3]
-      }));
-    }
   }
 
   confirmInitialPeek(): void {
     const localId = this.localPlayerId();
-    this.state.update(s => {
-      const players = s.players.map(p => p.id === localId ? { ...p, hasPeekedInitial: true } : p);
-      const allPeeked = players.every(p => p.hasPeekedInitial);
-      return {
-        ...s,
-        players,
-        phase: allPeeked ? 'PLAYING' : s.phase
-      };
-    });
+    this.state.update(s => ({
+      ...s,
+      players: s.players.map(p => p.id === localId ? { ...p, hasPeekedInitial: true } : p)
+    }));
 
     if (this.isHost()) {
       this.checkAndStartTurns();
@@ -266,14 +382,14 @@ export class GameService {
 
   private checkAndStartTurns(): void {
     const s = this.state();
-    if (s.players.every(p => p.hasPeekedInitial)) {
+    if (s.phase === 'INITIAL_PEEK' && s.players.every(p => p.hasPeekedInitial)) {
       this.state.update(st => ({
         ...st,
         phase: 'PLAYING',
         logs: [...st.logs, {
           id: Math.random().toString(),
           timestamp: Date.now(),
-          message: `All players ready! Turn begins with ${st.players[0].name}.`,
+          message: `All operatives locked in! Cards closed. Turn begins with ${st.players[0].name}.`,
           type: 'info'
         }]
       }));
@@ -286,130 +402,163 @@ export class GameService {
   }
 
   // -------------------------------------------------------------
-  // TURN ACTIONS: DRAW
+  // TURN ACTIONS: DRAW (UNIFIED HOST/PEER)
   // -------------------------------------------------------------
   drawFromDeck(): void {
-    if (!this.isMyTurn() || this.state().drawnCard !== null) return;
+    if (!this.isMyTurn() || this.state().drawnCard !== null || this.state().activeAction !== null) return;
     this.sound.playCardFlip();
 
     if (this.isHost()) {
-      if (this.canonicalDeck.length === 0) {
-        this.recycleDiscardPile();
-      }
-      const drawn = this.canonicalDeck.pop();
-      if (!drawn) return;
-
-      this.state.update(s => ({
-        ...s,
-        drawnCard: drawn,
-        drawPileCount: this.canonicalDeck.length,
-        logs: [...s.logs, {
-          id: Math.random().toString(),
-          timestamp: Date.now(),
-          message: `${this.localPlayerName()} drew from the memory buffer.`,
-          type: 'action'
-        }]
-      }));
-      this.broadcastState();
+      this.performDrawDeck(this.localPlayerId());
     } else {
       this.sendPlayerAction?.({ type: 'DRAW_DECK', playerId: this.localPlayerId() });
     }
   }
 
+  private performDrawDeck(playerId: string): void {
+    const s = this.state();
+    if (s.phase !== 'PLAYING' || s.currentTurnPlayerId !== playerId || s.drawnCard !== null || s.activeAction !== null) return;
+    if (this.isPlayerFrozen(playerId)) return;
+
+    if (this.canonicalDeck.length === 0) {
+      this.recycleDiscardPile();
+    }
+    const drawn = this.canonicalDeck.pop();
+    if (!drawn) {
+      this.addLog('No cards remaining in deck or discard to draw!', 'warning');
+      this.broadcastState();
+      return;
+    }
+
+    const player = s.players.find(p => p.id === playerId);
+    this.state.update(curr => ({
+      ...curr,
+      drawnCard: drawn,
+      drawnSource: 'DECK',
+      drawPileCount: this.canonicalDeck.length,
+      logs: [...curr.logs, {
+        id: Math.random().toString(),
+        timestamp: Date.now(),
+        message: `${player?.name || 'Operative'} drew a card from the Memory Buffer.`,
+        type: 'action'
+      }]
+    }));
+    this.broadcastState();
+  }
+
   drawFromDiscard(): void {
-    if (!this.isMyTurn() || this.state().drawnCard !== null || this.state().discardPile.length === 0) return;
+    if (!this.isMyTurn() || this.state().drawnCard !== null || this.state().activeAction !== null || this.state().discardPile.length === 0) return;
     this.sound.playCardFlip();
 
     if (this.isHost()) {
-      const discard = [...this.state().discardPile];
-      const drawn = discard.pop()!;
-
-      this.state.update(s => ({
-        ...s,
-        drawnCard: drawn,
-        discardPile: discard,
-        logs: [...s.logs, {
-          id: Math.random().toString(),
-          timestamp: Date.now(),
-          message: `${this.localPlayerName()} took the top discard: ${drawn.label}${drawn.suit}.`,
-          type: 'action'
-        }]
-      }));
-      this.broadcastState();
+      this.performDrawDiscard(this.localPlayerId());
     } else {
       this.sendPlayerAction?.({ type: 'DRAW_DISCARD', playerId: this.localPlayerId() });
     }
   }
 
+  private performDrawDiscard(playerId: string): void {
+    const s = this.state();
+    if (s.phase !== 'PLAYING' || s.currentTurnPlayerId !== playerId || s.drawnCard !== null || s.activeAction !== null) return;
+    if (s.discardPile.length === 0 || this.isPlayerFrozen(playerId)) return;
+
+    const discard = [...s.discardPile];
+    const drawn = discard.pop()!;
+    const player = s.players.find(p => p.id === playerId);
+
+    this.state.update(curr => ({
+      ...curr,
+      drawnCard: drawn,
+      drawnSource: 'DISCARD',
+      discardPile: discard,
+      logs: [...curr.logs, {
+        id: Math.random().toString(),
+        timestamp: Date.now(),
+        message: `${player?.name || 'Operative'} took top discard [${this.formatCardTag(drawn)}] (must swap into hand).`,
+        type: 'action'
+      }]
+    }));
+    this.broadcastState();
+  }
+
   // -------------------------------------------------------------
-  // TURN ACTIONS: REPLACE / DISCARD
+  // TURN ACTIONS: REPLACE / DISCARD (UNIFIED HOST/PEER)
   // -------------------------------------------------------------
   replaceCardInHand(slotIndex: number): void {
-    const drawn = this.state().drawnCard;
-    if (!this.isMyTurn() || !drawn) return;
+    if (!this.isMyTurn() || !this.state().drawnCard) return;
     this.sound.playCardFlip();
 
     if (this.isHost()) {
-      const players = [...this.state().players];
-      const me = players.find(p => p.id === this.localPlayerId())!;
-      const oldCard = me.cards[slotIndex];
-
-      // Replace card
-      me.cards[slotIndex] = drawn;
-
-      // Update local memory
-      this.knownCards.update(k => {
-        const next = { ...k };
-        delete next[oldCard.id];
-        next[drawn.id] = drawn;
-        return next;
-      });
-
-      this.state.update(s => ({
-        ...s,
-        players,
-        drawnCard: null,
-        discardPile: [...s.discardPile, oldCard],
-        logs: [...s.logs, {
-          id: Math.random().toString(),
-          timestamp: Date.now(),
-          message: `${this.localPlayerName()} swapped a chip in hand with drawn card.`,
-          type: 'action'
-        }]
-      }));
-
-      this.finishTurn();
+      this.performReplaceHand(this.localPlayerId(), slotIndex);
     } else {
       this.sendPlayerAction?.({ type: 'REPLACE_HAND', playerId: this.localPlayerId(), slotIndex });
     }
   }
 
+  private performReplaceHand(playerId: string, slotIndex: number): void {
+    const s = this.state();
+    const drawn = s.drawnCard;
+    if (!drawn || s.currentTurnPlayerId !== playerId || this.isPlayerFrozen(playerId)) return;
+
+    const players = s.players.map(p => ({ ...p, cards: [...p.cards] }));
+    const player = players.find(p => p.id === playerId);
+    if (!player || slotIndex < 0 || slotIndex >= player.cards.length) return;
+
+    const oldCard = player.cards[slotIndex];
+    player.cards[slotIndex] = drawn;
+
+    this.state.update(curr => ({
+      ...curr,
+      players,
+      drawnCard: null,
+      drawnSource: null,
+      discardPile: [...curr.discardPile, oldCard],
+      logs: [...curr.logs, {
+        id: Math.random().toString(),
+        timestamp: Date.now(),
+        message: `${player.name} swapped chip #${slotIndex + 1} and discarded [${this.formatCardTag(oldCard)}].`,
+        type: 'action'
+      }]
+    }));
+
+    this.finishTurn();
+  }
+
   discardDrawnCard(): void {
-    const drawn = this.state().drawnCard;
-    if (!this.isMyTurn() || !drawn) return;
+    const s = this.state();
+    if (!this.isMyTurn() || !s.drawnCard || s.drawnSource !== 'DECK') return;
     this.sound.playCardFlip();
 
     if (this.isHost()) {
-      this.state.update(s => ({
-        ...s,
-        drawnCard: null,
-        discardPile: [...s.discardPile, drawn],
-        logs: [...s.logs, {
-          id: Math.random().toString(),
-          timestamp: Date.now(),
-          message: `${this.localPlayerName()} discarded drawn card [${drawn.label}${drawn.suit}].`,
-          type: 'action'
-        }]
-      }));
-
-      // Check if discarded card has an action power
-      if (drawn.action !== 'NONE') {
-        this.triggerCardAction(drawn, this.localPlayerId());
-      } else {
-        this.finishTurn();
-      }
+      this.performDiscardDrawn(this.localPlayerId());
     } else {
       this.sendPlayerAction?.({ type: 'DISCARD_DRAWN', playerId: this.localPlayerId() });
+    }
+  }
+
+  private performDiscardDrawn(playerId: string): void {
+    const s = this.state();
+    const drawn = s.drawnCard;
+    if (!drawn || s.drawnSource !== 'DECK' || s.currentTurnPlayerId !== playerId || this.isPlayerFrozen(playerId)) return;
+
+    const player = s.players.find(p => p.id === playerId);
+    this.state.update(curr => ({
+      ...curr,
+      drawnCard: null,
+      drawnSource: null,
+      discardPile: [...curr.discardPile, drawn],
+      logs: [...curr.logs, {
+        id: Math.random().toString(),
+        timestamp: Date.now(),
+        message: `${player?.name || 'Operative'} discarded drawn card [${this.formatCardTag(drawn)}].`,
+        type: 'action'
+      }]
+    }));
+
+    if (drawn.action !== 'NONE') {
+      this.triggerCardAction(drawn, playerId);
+    } else {
+      this.finishTurn();
     }
   }
 
@@ -418,51 +567,71 @@ export class GameService {
   // -------------------------------------------------------------
   private triggerCardAction(card: Card, playerId: string): void {
     this.sound.playActionPower();
+    const s = this.state();
+    const activePlayer = s.players.find(p => p.id === playerId);
+
+    // Check if valid targets exist (e.g. unfrozen players with >=1 card)
+    const ownHasCards = (activePlayer?.cards.length || 0) > 0;
+    const unfrozenOpponentsWithCards = s.players.filter(
+      p => p.id !== playerId && !this.isPlayerFrozen(p.id) && p.cards.length > 0
+    );
+    const totalSwappableCards = s.players
+      .filter(p => !this.isPlayerFrozen(p.id))
+      .reduce((acc, p) => acc + p.cards.length, 0);
 
     if (card.action === 'PEEK_OWN') {
-      this.state.update(s => ({
-        ...s,
+      if (!ownHasCards) {
+        this.resolveActionComplete(`${activePlayer?.name} has no cards to peek.`);
+        return;
+      }
+      this.state.update(curr => ({
+        ...curr,
         activeAction: {
           type: 'PEEK_OWN',
           sourcePlayerId: playerId,
-          message: 'Rank 7/8: Select 1 of your own cards to peek!'
+          message: 'Rank 7/8: Select 1 of your own chips to decrypt for 3s!'
         }
       }));
       this.broadcastState();
 
-      const player = this.state().players.find(p => p.id === playerId);
-      if (player?.isBot) {
-        setTimeout(() => this.runBotPeekOwn(player), 1000);
+      if (activePlayer?.isBot) {
+        setTimeout(() => this.runBotPeekOwn(activePlayer), 1000);
       }
     } else if (card.action === 'PEEK_OTHER') {
-      this.state.update(s => ({
-        ...s,
+      if (unfrozenOpponentsWithCards.length === 0) {
+        this.resolveActionComplete(`${activePlayer?.name}: No unfrozen opponent cards to inspect.`);
+        return;
+      }
+      this.state.update(curr => ({
+        ...curr,
         activeAction: {
           type: 'PEEK_OTHER',
           sourcePlayerId: playerId,
-          message: 'Rank 9/10: Select an opponent’s card to inspect!'
+          message: 'Rank 9/10: Select an unfrozen rival’s chip to inspect for 3s!'
         }
       }));
       this.broadcastState();
 
-      const player = this.state().players.find(p => p.id === playerId);
-      if (player?.isBot) {
-        setTimeout(() => this.runBotPeekOther(player), 1000);
+      if (activePlayer?.isBot) {
+        setTimeout(() => this.runBotPeekOther(activePlayer), 1000);
       }
     } else if (card.action === 'SWAP') {
-      this.state.update(s => ({
-        ...s,
+      if (totalSwappableCards < 2) {
+        this.resolveActionComplete(`${activePlayer?.name}: Not enough unfrozen cards to swap.`);
+        return;
+      }
+      this.state.update(curr => ({
+        ...curr,
         activeAction: {
           type: 'SWAP_SELECT_FIRST',
           sourcePlayerId: playerId,
-          message: 'Rank J/Q: Select the first card to swap!'
+          message: 'Rank J/Q: Select the 1st unfrozen chip to swap!'
         }
       }));
       this.broadcastState();
 
-      const player = this.state().players.find(p => p.id === playerId);
-      if (player?.isBot) {
-        setTimeout(() => this.runBotSwap(player), 1000);
+      if (activePlayer?.isBot) {
+        setTimeout(() => this.runBotSwap(activePlayer), 1000);
       }
     }
   }
@@ -480,6 +649,8 @@ export class GameService {
     this.temporarilyOpenCards.update(curr => ({ ...curr, [cardId]: exp }));
     setTimeout(() => {
       this.temporarilyOpenCards.update(curr => {
+        // Only clear if another click hasn't extended this card's timer
+        if (curr[cardId] !== exp) return curr;
         const next = { ...curr };
         delete next[cardId];
         return next;
@@ -489,29 +660,25 @@ export class GameService {
 
   // -------------------------------------------------------------
   // UNIFIED CARD CLICK INTERACTION
-  // 1. Peek side effect opens card for 3s with a timer
-  // 2. If drew a card: replaces clicked card with drawn card & discards old card
-  // 3. If discard matches rank: discards this card, and gives card to opponent if done for opponent
-  // 4. If doesn't match: player receives +1 penalty card
+  // 1. In INITIAL_PEEK: no extra peeks allowed (bottom 2 are shown automatically until confirmed)
+  // 2. Frozen player hands cannot interact or be targeted
+  // 3. If drew a card: switches clicked card with drawn card & discards clicked card
+  // 4. If resolving power action: executes peek/swap/transfer
+  // 5. Otherwise: opens clicked card for 3s; if discard matches -> discards (and transfers if opponent's); if mismatch -> +1 penalty card!
   // -------------------------------------------------------------
   handleCardClick(targetPlayerId: string, slotIndex: number): void {
     const localId = this.localPlayerId();
     const state = this.state();
 
-    // In INITIAL_PEEK phase, clicking a card opens it for 3 seconds
-    if (state.phase === 'INITIAL_PEEK') {
-      const targetP = state.players.find(p => p.id === targetPlayerId);
-      const c = targetP?.cards[slotIndex];
-      if (c) {
-        this.sound.playCardFlip();
-        this.temporaryRevealCard(c.id, 3000);
-      }
+    if (state.phase !== 'PLAYING') return;
+
+    // Frozen players cannot click or interact with cards
+    if (this.isPlayerFrozen(localId)) {
+      this.addLog('❄️ Your hand is FROZEN until Showdown!', 'warning');
       return;
     }
 
-    if (state.phase !== 'PLAYING') return;
-
-    // Condition 3: If player drew a card, switch clicked card with drawn card & discard clicked card!
+    // Condition 3: Holding drawn card -> swap with own card
     if (state.drawnCard !== null) {
       if (targetPlayerId === localId && this.isMyTurn()) {
         this.replaceCardInHand(slotIndex);
@@ -519,7 +686,7 @@ export class GameService {
       return;
     }
 
-    // Resolving an active special power action
+    // Resolving an active special power or card transfer
     if (state.activeAction !== null) {
       const action = state.activeAction;
       if (action.sourcePlayerId !== localId) return;
@@ -540,14 +707,31 @@ export class GameService {
         return;
       }
 
+      // Prevent targeting frozen players for peeks or swaps
+      if (this.isPlayerFrozen(targetPlayerId)) {
+        this.addLog('❄️ Cannot target a FROZEN player’s cards!', 'warning');
+        return;
+      }
+
       if (action.type === 'PEEK_OWN') {
         if (targetPlayerId !== localId) return;
         const me = state.players.find(p => p.id === localId);
         const card = me?.cards[slotIndex];
         if (card) {
+          // Open privately for 3 seconds for local player only
           this.sound.playCardFlip();
           this.temporaryRevealCard(card.id, 3000);
-          this.resolveActionComplete(`${this.localPlayerName()} peeked at their card #${slotIndex + 1}.`);
+          if (this.isHost()) {
+            this.performResolvePeek(localId, targetPlayerId, slotIndex, 'PEEK_OWN');
+          } else {
+            this.sendPlayerAction?.({
+              type: 'RESOLVE_PEEK_ACTION',
+              playerId: localId,
+              targetPlayerId,
+              slotIndex,
+              actionType: 'PEEK_OWN'
+            });
+          }
         }
         return;
       }
@@ -557,14 +741,27 @@ export class GameService {
         const targetP = state.players.find(p => p.id === targetPlayerId);
         const card = targetP?.cards[slotIndex];
         if (card && targetP) {
+          // Open privately for 3 seconds for local player only
           this.sound.playCardFlip();
           this.temporaryRevealCard(card.id, 3000);
-          this.resolveActionComplete(`${this.localPlayerName()} peeked at ${targetP.name}’s card #${slotIndex + 1}.`);
+          if (this.isHost()) {
+            this.performResolvePeek(localId, targetPlayerId, slotIndex, 'PEEK_OTHER');
+          } else {
+            this.sendPlayerAction?.({
+              type: 'RESOLVE_PEEK_ACTION',
+              playerId: localId,
+              targetPlayerId,
+              slotIndex,
+              actionType: 'PEEK_OTHER'
+            });
+          }
         }
         return;
       }
 
       if (action.type === 'SWAP_SELECT_FIRST') {
+        const targetP = state.players.find(p => p.id === targetPlayerId);
+        if (!targetP || !targetP.cards[slotIndex]) return;
         this.state.update(s => ({
           ...s,
           activeAction: {
@@ -572,20 +769,37 @@ export class GameService {
             sourcePlayerId: action.sourcePlayerId,
             targetPlayerId,
             firstCardIndex: slotIndex,
-            message: `Selected first card. Now click the 2nd card to swap!`
+            message: `1st chip selected (${targetPlayerId === localId ? 'yours' : targetP.name}'s #${slotIndex + 1}). Click a different chip to swap (or click again to deselect)!`
           }
         }));
         return;
       }
 
       if (action.type === 'SWAP_SELECT_SECOND') {
-        this.executeSwap(action.targetPlayerId!, action.firstCardIndex!, targetPlayerId, slotIndex);
+        // Clicking the exact same card deselects it
+        if (action.targetPlayerId === targetPlayerId && action.firstCardIndex === slotIndex) {
+          this.state.update(s => ({
+            ...s,
+            activeAction: {
+              type: 'SWAP_SELECT_FIRST',
+              sourcePlayerId: action.sourcePlayerId,
+              message: 'Rank J/Q: Select the 1st unfrozen chip to swap!'
+            }
+          }));
+          return;
+        }
+        this.executeSwap(action.targetPlayerId!, action.firstCardIndex!, targetPlayerId, slotIndex, localId);
         return;
       }
       return;
     }
 
     // Condition 1 & 2: Match against discard OR penalty
+    if (this.isPlayerFrozen(targetPlayerId)) {
+      this.addLog('❄️ That player’s cards are FROZEN from play!', 'warning');
+      return;
+    }
+
     if (this.isHost()) {
       this.processCardMatchOrPenalty(localId, targetPlayerId, slotIndex);
     } else {
@@ -593,27 +807,43 @@ export class GameService {
     }
   }
 
+  private performResolvePeek(actorId: string, targetPlayerId: string, slotIndex: number, actionType: 'PEEK_OWN' | 'PEEK_OTHER'): void {
+    const s = this.state();
+    if (!s.activeAction || s.activeAction.sourcePlayerId !== actorId) return;
+    const actor = s.players.find(p => p.id === actorId);
+    const target = s.players.find(p => p.id === targetPlayerId);
+
+    const msg = actionType === 'PEEK_OWN'
+      ? `${actor?.name || 'Operative'} decrypted their chip #${slotIndex + 1} (3s peek).`
+      : `${actor?.name || 'Operative'} infiltrated ${target?.name || 'rival'}’s chip #${slotIndex + 1} (3s peek).`;
+
+    this.resolveActionComplete(msg);
+  }
+
   processCardMatchOrPenalty(clickerId: string, targetPlayerId: string, slotIndex: number): void {
     const s = this.state();
+    if (s.phase !== 'PLAYING' || s.activeAction !== null || s.drawnCard !== null) return;
+    if (this.isPlayerFrozen(clickerId) || this.isPlayerFrozen(targetPlayerId)) return;
+
     const discardPile = s.discardPile;
-    if (discardPile.length === 0 || s.phase !== 'PLAYING') return;
+    if (discardPile.length === 0) return;
 
     const topDiscard = discardPile[discardPile.length - 1];
-    const targetPlayer = s.players.find(p => p.id === targetPlayerId);
-    const clicker = s.players.find(p => p.id === clickerId);
+    const players = s.players.map(p => ({ ...p, cards: [...p.cards] }));
+    const targetPlayer = players.find(p => p.id === targetPlayerId);
+    const clicker = players.find(p => p.id === clickerId);
     if (!targetPlayer || !clicker) return;
 
     const clickedCard = targetPlayer.cards[slotIndex];
     if (!clickedCard) return;
 
-    // 1. SIDE EFFECT: PEEK FUNCTION OPENS THE CARD FOR 3 SECONDS
+    // 1. SIDE EFFECT: PEEK FUNCTION OPENS THE CARD FOR 3 SECONDS FOR EVERYONE
     this.temporaryRevealCard(clickedCard.id, 3000);
     this.sound.playCardFlip();
     this.sendSyncReveal?.({ cardId: clickedCard.id, durationMs: 3000 });
 
     // 2. CHECK MATCH AGAINST TOP DISCARD
     if (clickedCard.rank === topDiscard.rank) {
-      // Condition 1: MATCH! Discards this card!
       this.sound.playSnap();
       targetPlayer.cards.splice(slotIndex, 1);
 
@@ -621,27 +851,26 @@ export class GameService {
         // Matched own card: shed card!
         this.state.update(curr => ({
           ...curr,
-          players: [...curr.players],
+          players,
           discardPile: [...curr.discardPile, clickedCard],
           logs: [...curr.logs, {
             id: Math.random().toString(),
             timestamp: Date.now(),
-            message: `⚡ MATCH! ${clicker.name} matched rank [${topDiscard.label}] with their card and discarded it!`,
+            message: `⚡ MATCH! ${clicker.name} matched [${this.formatCardTag(clickedCard)}] and shed their card!`,
             type: 'snap'
           }]
         }));
         this.broadcastState();
       } else {
-        // Matched opponent's card:
-        // "give additional card from my deck to opponent if I did it for the opponent"
+        // Matched opponent's card: discard opponent's card and transfer 1 of clicker's cards to opponent
         this.state.update(curr => ({
           ...curr,
-          players: [...curr.players],
+          players,
           discardPile: [...curr.discardPile, clickedCard],
           logs: [...curr.logs, {
             id: Math.random().toString(),
             timestamp: Date.now(),
-            message: `⚡ OPPONENT MATCH! ${clicker.name} matched ${targetPlayer.name}’s rank [${topDiscard.label}] card! Shed opponent's card!`,
+            message: `⚡ OPPONENT MATCH! ${clicker.name} matched ${targetPlayer.name}’s [${this.formatCardTag(clickedCard)}] card!`,
             type: 'snap'
           }]
         }));
@@ -653,55 +882,63 @@ export class GameService {
             this.addLog(`🔄 ${clicker.name} gave 1 card to ${targetPlayer.name} as replacement!`, 'action');
             this.broadcastState();
           } else {
-            if (clicker.id === this.localPlayerId()) {
-              this.state.update(curr => ({
-                ...curr,
-                activeAction: {
-                  type: 'TRANSFER_CARD_TO_OPPONENT',
-                  sourcePlayerId: clicker.id,
-                  targetPlayerId: targetPlayer.id,
-                  message: `Match successful! Select one of YOUR cards to hand over to ${targetPlayer.name}.`
-                }
-              }));
-              this.broadcastState();
-            } else {
-              const transferred = clicker.cards.pop()!;
-              targetPlayer.cards.push(transferred);
-              this.addLog(`🔄 ${clicker.name} gave 1 card to ${targetPlayer.name}!`, 'action');
-              this.broadcastState();
-            }
+            // Let any human clicker (host OR remote peer) select which card to give!
+            this.state.update(curr => ({
+              ...curr,
+              activeAction: {
+                type: 'TRANSFER_CARD_TO_OPPONENT',
+                sourcePlayerId: clicker.id,
+                targetPlayerId: targetPlayer.id,
+                message: `${clicker.name}: Match successful! Select one of YOUR chips to hand over to ${targetPlayer.name}.`
+              }
+            }));
+            this.broadcastState();
           }
         } else {
           this.broadcastState();
         }
       }
     } else {
-      // Condition 2: MISMATCH! Player gets additional penalty card from draw deck!
+      // MISMATCH: Player gets additional penalty card from draw deck!
       this.sound.playActionPower();
+      if (this.canonicalDeck.length === 0) {
+        this.recycleDiscardPile();
+      }
       const penaltyCard = this.canonicalDeck.pop();
       if (penaltyCard) {
         clicker.cards.push(penaltyCard);
         this.state.update(curr => ({
           ...curr,
-          players: [...curr.players],
+          players,
           drawPileCount: this.canonicalDeck.length,
           logs: [...curr.logs, {
             id: Math.random().toString(),
             timestamp: Date.now(),
-            message: `❌ MISMATCH PENALTY! ${clicker.name} clicked [${clickedCard.label} of ${clickedCard.suit}] (does not match discard [${topDiscard.label}]). Drew a penalty card (+1)!`,
+            message: `❌ MISMATCH PENALTY! ${clicker.name} clicked [${this.formatCardTag(clickedCard)}] (discard is [${this.formatCardTag(topDiscard)}]). Drew +1 penalty card!`,
             type: 'danger'
           }]
         }));
-        this.broadcastState();
+      } else {
+        this.state.update(curr => ({
+          ...curr,
+          logs: [...curr.logs, {
+            id: Math.random().toString(),
+            timestamp: Date.now(),
+            message: `❌ MISMATCH! ${clicker.name} clicked [${this.formatCardTag(clickedCard)}] (deck empty, no penalty card left).`,
+            type: 'danger'
+          }]
+        }));
       }
+      this.broadcastState();
     }
   }
 
   transferCardToPlayer(fromPlayerId: string, cardIndex: number, toPlayerId: string): void {
     const s = this.state();
-    const fromP = s.players.find(p => p.id === fromPlayerId);
-    const toP = s.players.find(p => p.id === toPlayerId);
-    if (!fromP || !toP || !fromP.cards[cardIndex]) return;
+    const players = s.players.map(p => ({ ...p, cards: [...p.cards] }));
+    const fromP = players.find(p => p.id === fromPlayerId);
+    const toP = players.find(p => p.id === toPlayerId);
+    if (!fromP || !toP || cardIndex < 0 || cardIndex >= fromP.cards.length) return;
 
     const card = fromP.cards.splice(cardIndex, 1)[0];
     toP.cards.push(card);
@@ -709,41 +946,60 @@ export class GameService {
     this.sound.playSnap();
     this.state.update(curr => ({
       ...curr,
-      players: [...curr.players],
+      players,
       activeAction: null,
       logs: [...curr.logs, {
         id: Math.random().toString(),
         timestamp: Date.now(),
-        message: `🔄 ${fromP.name} gave card #${cardIndex + 1} to ${toP.name}!`,
+        message: `🔄 ${fromP.name} gave chip #${cardIndex + 1} to ${toP.name}!`,
         type: 'action'
       }]
     }));
     this.broadcastState();
   }
 
-  private executeSwap(p1Id: string, idx1: number, p2Id: string, idx2: number): void {
+  private executeSwap(p1Id: string, idx1: number, p2Id: string, idx2: number, actorId: string): void {
     if (this.isHost()) {
-      const players = [...this.state().players];
+      const s = this.state();
+      if (this.isPlayerFrozen(p1Id) || this.isPlayerFrozen(p2Id)) return;
+      if (p1Id === p2Id && idx1 === idx2) return;
+
+      const players = s.players.map(p => ({ ...p, cards: [...p.cards] }));
       const p1 = players.find(p => p.id === p1Id);
       const p2 = players.find(p => p.id === p2Id);
+      const actor = players.find(p => p.id === actorId);
 
-      if (p1 && p2) {
+      if (p1 && p2 && p1.cards[idx1] && p2.cards[idx2]) {
         const c1 = p1.cards[idx1];
         const c2 = p2.cards[idx2];
         p1.cards[idx1] = c2;
         p2.cards[idx2] = c1;
 
         this.sound.playSnap();
-        this.resolveActionComplete(`${this.localPlayerName()} swapped ${p1.name}’s card with ${p2.name}’s card!`);
+        this.state.update(curr => ({ ...curr, players }));
+        this.resolveActionComplete(`${actor?.name || 'Operative'} swapped ${p1.name}’s #${idx1 + 1} with ${p2.name}’s #${idx2 + 1}!`);
       }
     } else {
-      this.sendPlayerAction?.({ type: 'EXECUTE_SWAP', p1Id, idx1, p2Id, idx2 });
+      this.sendPlayerAction?.({ type: 'EXECUTE_SWAP', p1Id, idx1, p2Id, idx2, actorId });
     }
   }
 
   skipAction(): void {
-    if (this.state().activeAction?.sourcePlayerId !== this.localPlayerId()) return;
-    this.resolveActionComplete(`${this.localPlayerName()} skipped the special card power.`);
+    const action = this.state().activeAction;
+    if (!action || action.sourcePlayerId !== this.localPlayerId()) return;
+
+    if (this.isHost()) {
+      this.performSkipAction(this.localPlayerId());
+    } else {
+      this.sendPlayerAction?.({ type: 'SKIP_ACTION', playerId: this.localPlayerId() });
+    }
+  }
+
+  private performSkipAction(playerId: string): void {
+    const s = this.state();
+    if (!s.activeAction || s.activeAction.sourcePlayerId !== playerId) return;
+    const player = s.players.find(p => p.id === playerId);
+    this.resolveActionComplete(`${player?.name || 'Operative'} skipped the special card power.`);
   }
 
   private resolveActionComplete(logMsg: string): void {
@@ -761,67 +1017,111 @@ export class GameService {
   }
 
   // -------------------------------------------------------------
-  // CALL CAMBIO
+  // CALL CAMBIO (Freezes caller immediately; each remaining player gets 1 pass & freezes)
   // -------------------------------------------------------------
   callCambio(): void {
-    if (!this.isMyTurn() || this.state().cambioCallerId !== null) return;
+    if (!this.isMyTurn() || this.state().drawnCard !== null || this.state().activeAction !== null || this.state().cambioCallerId !== null) return;
     this.sound.playCambioAlert();
 
-    const callerId = this.localPlayerId();
-    const callerName = this.localPlayerName();
-
     if (this.isHost()) {
-      const remainingTurns = this.state().players.length - 1;
-      this.state.update(s => ({
-        ...s,
-        cambioCallerId: callerId,
-        finalTurnsRemaining: remainingTurns,
-        logs: [...s.logs, {
-          id: Math.random().toString(),
-          timestamp: Date.now(),
-          message: `🚨 ${callerName} CALLED CAMBIO! Final cycle has begun!`,
-          type: 'cambio'
-        }]
-      }));
-      this.broadcastState();
-      this.finishTurn();
+      this.performCallCambio(this.localPlayerId());
     } else {
-      this.sendPlayerAction?.({ type: 'CALL_CAMBIO', playerId: callerId });
+      this.sendPlayerAction?.({ type: 'CALL_CAMBIO', playerId: this.localPlayerId() });
     }
   }
 
+  private performCallCambio(callerId: string): void {
+    const s = this.state();
+    if (s.phase !== 'PLAYING' || s.currentTurnPlayerId !== callerId || s.cambioCallerId !== null) return;
+    if (s.drawnCard !== null || s.activeAction !== null) return;
+
+    const caller = s.players.find(p => p.id === callerId);
+    const frozen = [callerId];
+    const remaining = s.players.length - frozen.length;
+
+    this.sound.playCambioAlert();
+    this.state.update(curr => ({
+      ...curr,
+      cambioCallerId: callerId,
+      frozenPlayerIds: frozen,
+      finalTurnsRemaining: remaining,
+      logs: [...curr.logs, {
+        id: Math.random().toString(),
+        timestamp: Date.now(),
+        message: `🚨 ${caller?.name || 'Operative'} CALLED CAMBIO! Their cards are FROZEN. Remaining players get 1 final pass!`,
+        type: 'cambio'
+      }]
+    }));
+
+    this.advanceAfterCambioOrTurn(false);
+  }
+
   // -------------------------------------------------------------
-  // TURN ROTATION & ROUND COMPLETION
+  // TURN ROTATION, PROGRESSIVE FREEZE & ROUND COMPLETION
   // -------------------------------------------------------------
   private finishTurn(): void {
     if (!this.isHost()) return;
+    this.advanceAfterCambioOrTurn(true);
+  }
 
-    let s = this.state();
+  private advanceAfterCambioOrTurn(freezeFinishedPlayerIfCambio: boolean): void {
+    const s = this.state();
     const players = s.players;
-    const currentIndex = players.findIndex(p => p.id === s.currentTurnPlayerId);
-    let nextIndex = (currentIndex + 1) % players.length;
+    let frozen = [...s.frozenPlayerIds];
 
-    // If Cambio was called, check remaining turns
-    if (s.cambioCallerId !== null) {
-      const rem = s.finalTurnsRemaining - 1;
-      if (rem <= 0) {
-        this.endGame();
-        return;
+    // If Cambio is active and the current player just finished their final pass, freeze their cards!
+    if (s.cambioCallerId !== null && freezeFinishedPlayerIfCambio) {
+      const finishedId = s.currentTurnPlayerId;
+      if (!frozen.includes(finishedId)) {
+        frozen.push(finishedId);
+        const finishedPlayer = players.find(p => p.id === finishedId);
+        this.state.update(curr => ({
+          ...curr,
+          frozenPlayerIds: frozen,
+          finalTurnsRemaining: Math.max(0, players.length - frozen.length),
+          logs: [...curr.logs, {
+            id: Math.random().toString(),
+            timestamp: Date.now(),
+            message: `❄️ ${finishedPlayer?.name || 'Operative'} finished their final pass. Cards FROZEN!`,
+            type: 'info'
+          }]
+        }));
       }
-      this.state.update(curr => ({ ...curr, finalTurnsRemaining: rem }));
     }
 
-    const nextPlayer = players[nextIndex];
+    // If all players are frozen, everyone has had their pass -> Showdown!
+    if (s.cambioCallerId !== null && frozen.length >= players.length) {
+      this.endGame();
+      return;
+    }
+
+    // Find next unfrozen player in turn order
+    const currentIndex = players.findIndex(p => p.id === s.currentTurnPlayerId);
+    let nextPlayer: Player | null = null;
+    for (let step = 1; step <= players.length; step++) {
+      const candidate = players[(currentIndex + step) % players.length];
+      if (!frozen.includes(candidate.id)) {
+        nextPlayer = candidate;
+        break;
+      }
+    }
+
+    if (!nextPlayer) {
+      this.endGame();
+      return;
+    }
+
     this.state.update(curr => ({
       ...curr,
-      currentTurnPlayerId: nextPlayer.id,
+      currentTurnPlayerId: nextPlayer!.id,
       drawnCard: null,
+      drawnSource: null,
       activeAction: null
     }));
     this.broadcastState();
 
     if (nextPlayer.isBot) {
-      setTimeout(() => this.runBotTurn(nextPlayer), 1500);
+      setTimeout(() => this.runBotTurn(nextPlayer!), 1500);
     }
   }
 
@@ -834,23 +1134,26 @@ export class GameService {
       return { ...p, score: totalScore };
     });
 
-    // Reveal all cards into known map for victory view
     const allKnown: Record<string, Card> = {};
     players.forEach(p => p.cards.forEach(c => allKnown[c.id] = c));
     this.knownCards.set(allKnown);
 
-    // Sort to determine winner (lowest score wins)
     const sorted = [...players].sort((a, b) => a.score - b.score);
-    const winner = sorted[0];
+    const lowestScore = sorted[0]?.score ?? 0;
+    const winners = sorted.filter(p => p.score === lowestScore).map(p => p.name).join(' & ');
 
     this.state.update(s => ({
       ...s,
       phase: 'GAME_OVER',
       players,
+      drawnCard: null,
+      drawnSource: null,
+      activeAction: null,
+      finalTurnsRemaining: 0,
       logs: [...s.logs, {
         id: Math.random().toString(),
         timestamp: Date.now(),
-        message: `🏆 GAME OVER! Winner: ${winner.name} with ${winner.score} points!`,
+        message: `🏆 GAME OVER! Winner: ${winners} with ${lowestScore} points!`,
         type: 'cambio'
       }]
     }));
@@ -870,91 +1173,102 @@ export class GameService {
   }
 
   // -------------------------------------------------------------
-  // SMART AI BOT SIMULATION
+  // SMART AI BOT SIMULATION (Null-safe & Freeze-aware)
   // -------------------------------------------------------------
   private runBotTurn(bot: Player): void {
-    if (this.state().phase !== 'PLAYING' || this.state().currentTurnPlayerId !== bot.id) return;
+    const s = this.state();
+    if (s.phase !== 'PLAYING' || s.currentTurnPlayerId !== bot.id || this.isPlayerFrozen(bot.id)) return;
 
-    // Check if bot wants to call Cambio
-    const knownBotPoints = bot.cards.slice(2, 4).reduce((sum, c) => sum + c.pointValue, 0);
-    if (this.state().cambioCallerId === null && knownBotPoints <= 5 && Math.random() < 0.6) {
-      this.sound.playCambioAlert();
-      const remainingTurns = this.state().players.length - 1;
-      this.state.update(s => ({
-        ...s,
-        cambioCallerId: bot.id,
-        finalTurnsRemaining: remainingTurns,
-        logs: [...s.logs, {
-          id: Math.random().toString(),
-          timestamp: Date.now(),
-          message: `🚨 ${bot.name} called CAMBIO!`,
-          type: 'cambio'
-        }]
-      }));
-      this.finishTurn();
+    // Fetch latest bot reference from state
+    const currentBot = s.players.find(p => p.id === bot.id);
+    if (!currentBot) return;
+
+    // If bot has 0 cards, call Cambio immediately if allowed, otherwise pass
+    if (currentBot.cards.length === 0) {
+      if (s.cambioCallerId === null) {
+        this.performCallCambio(currentBot.id);
+      } else {
+        this.finishTurn();
+      }
+      return;
+    }
+
+    // Check if bot wants to call Cambio (only if nobody called it yet and bot holds low points)
+    const sampleCards = currentBot.cards.slice(-2);
+    const knownBotPoints = sampleCards.reduce((sum, c) => sum + c.pointValue, 0);
+    if (s.cambioCallerId === null && knownBotPoints <= 4 && currentBot.cards.length <= 4 && Math.random() < 0.45) {
+      this.performCallCambio(currentBot.id);
       return;
     }
 
     // Bot decides to draw from discard or deck
-    const topDiscard = this.state().discardPile[this.state().discardPile.length - 1];
-    if (topDiscard && topDiscard.pointValue <= 3 && Math.random() < 0.8) {
-      // Take from discard and replace highest card
-      const discard = [...this.state().discardPile];
+    const topDiscard = s.discardPile[s.discardPile.length - 1];
+    if (topDiscard && topDiscard.pointValue <= 3 && Math.random() < 0.75) {
+      const discard = [...s.discardPile];
       const taken = discard.pop()!;
-      const oldCard = bot.cards[0];
-      bot.cards[0] = taken;
+      const replaceIdx = Math.floor(Math.random() * currentBot.cards.length);
+      const players = s.players.map(p => ({ ...p, cards: [...p.cards] }));
+      const botCopy = players.find(p => p.id === currentBot.id)!;
+      const oldCard = botCopy.cards[replaceIdx];
+      botCopy.cards[replaceIdx] = taken;
 
       this.sound.playCardFlip();
-      this.state.update(s => ({
-        ...s,
+      this.state.update(curr => ({
+        ...curr,
+        players,
         discardPile: [...discard, oldCard],
-        logs: [...s.logs, {
+        logs: [...curr.logs, {
           id: Math.random().toString(),
           timestamp: Date.now(),
-          message: `${bot.name} took discard [${taken.label}${taken.suit}] and replaced a card.`,
+          message: `${currentBot.name} took discard [${this.formatCardTag(taken)}] and replaced chip #${replaceIdx + 1}.`,
           type: 'action'
         }]
       }));
       this.finishTurn();
     } else {
-      // Draw from deck
       if (this.canonicalDeck.length === 0) this.recycleDiscardPile();
       const drawn = this.canonicalDeck.pop();
-      if (!drawn) return;
+      if (!drawn) {
+        this.finishTurn();
+        return;
+      }
 
       this.sound.playCardFlip();
       if (drawn.pointValue <= 4) {
-        // Good card: replace bot's slot 1
-        const oldCard = bot.cards[1];
-        bot.cards[1] = drawn;
-        this.state.update(s => ({
-          ...s,
-          discardPile: [...s.discardPile, oldCard],
+        const replaceIdx = Math.floor(Math.random() * currentBot.cards.length);
+        const players = this.state().players.map(p => ({ ...p, cards: [...p.cards] }));
+        const botCopy = players.find(p => p.id === currentBot.id)!;
+        const oldCard = botCopy.cards[replaceIdx];
+        botCopy.cards[replaceIdx] = drawn;
+
+        this.state.update(curr => ({
+          ...curr,
+          players,
+          discardPile: [...curr.discardPile, oldCard],
           drawPileCount: this.canonicalDeck.length,
-          logs: [...s.logs, {
+          logs: [...curr.logs, {
             id: Math.random().toString(),
             timestamp: Date.now(),
-            message: `${bot.name} drew and kept the card, discarding replaced chip.`,
+            message: `${currentBot.name} drew from buffer, swapped chip #${replaceIdx + 1}, discarded [${this.formatCardTag(oldCard)}].`,
             type: 'action'
           }]
         }));
         this.finishTurn();
       } else {
-        // Discard drawn card
-        this.state.update(s => ({
-          ...s,
-          discardPile: [...s.discardPile, drawn],
+        this.state.update(curr => ({
+          ...curr,
+          discardPile: [...curr.discardPile, drawn],
           drawPileCount: this.canonicalDeck.length,
-          logs: [...s.logs, {
+          logs: [...curr.logs, {
             id: Math.random().toString(),
             timestamp: Date.now(),
-            message: `${bot.name} discarded drawn card [${drawn.label}${drawn.suit}].`,
+            message: `${currentBot.name} drew & discarded [${this.formatCardTag(drawn)}].`,
             type: 'action'
           }]
         }));
 
         if (drawn.action !== 'NONE') {
-          this.triggerCardAction(drawn, bot.id);
+          this.triggerCardAction(drawn, currentBot.id);
         } else {
           this.finishTurn();
         }
@@ -967,22 +1281,40 @@ export class GameService {
   }
 
   private runBotPeekOther(bot: Player): void {
-    const opponents = this.state().players.filter(p => p.id !== bot.id);
+    const opponents = this.state().players.filter(
+      p => p.id !== bot.id && !this.isPlayerFrozen(p.id) && p.cards.length > 0
+    );
+    if (opponents.length === 0) {
+      this.resolveActionComplete(`${bot.name} skipped peek.`);
+      return;
+    }
     const target = opponents[Math.floor(Math.random() * opponents.length)];
     this.resolveActionComplete(`${bot.name} scanned an encrypted chip from ${target.name}.`);
   }
 
   private runBotSwap(bot: Player): void {
-    const opponents = this.state().players.filter(p => p.id !== bot.id);
-    if (opponents.length > 0) {
-      const target = opponents[0];
-      const botCardIdx = Math.floor(Math.random() * bot.cards.length);
+    const s = this.state();
+    const currentBot = s.players.find(p => p.id === bot.id);
+    const opponents = s.players.filter(
+      p => p.id !== bot.id && !this.isPlayerFrozen(p.id) && p.cards.length > 0
+    );
+
+    if (currentBot && currentBot.cards.length > 0 && opponents.length > 0) {
+      const target = opponents[Math.floor(Math.random() * opponents.length)];
+      const botCardIdx = Math.floor(Math.random() * currentBot.cards.length);
       const targetCardIdx = Math.floor(Math.random() * target.cards.length);
-      const c1 = bot.cards[botCardIdx];
-      bot.cards[botCardIdx] = target.cards[targetCardIdx];
-      target.cards[targetCardIdx] = c1;
+
+      const players = s.players.map(p => ({ ...p, cards: [...p.cards] }));
+      const bCopy = players.find(p => p.id === currentBot.id)!;
+      const tCopy = players.find(p => p.id === target.id)!;
+
+      const c1 = bCopy.cards[botCardIdx];
+      bCopy.cards[botCardIdx] = tCopy.cards[targetCardIdx];
+      tCopy.cards[targetCardIdx] = c1;
+
       this.sound.playSnap();
-      this.resolveActionComplete(`${bot.name} initiated a neural spoof swap with ${target.name}!`);
+      this.state.update(curr => ({ ...curr, players }));
+      this.resolveActionComplete(`${currentBot.name} executed a neural spoof swap with ${target.name}!`);
     } else {
       this.resolveActionComplete(`${bot.name} skipped swap.`);
     }
@@ -991,77 +1323,121 @@ export class GameService {
   // -------------------------------------------------------------
   // NETWORKING: TRYSTERO WEBRTC P2P
   // -------------------------------------------------------------
-  private initP2P(roomCode: string): void {
+  private cleanupP2P(): void {
     try {
-      this.p2pRoom = joinRoom({ appId: APP_ID }, roomCode);
+      this.p2pRoom?.leave();
+    } catch {}
+    this.p2pRoom = null;
+    this.sendSyncState = null;
+    this.sendPlayerAction = null;
+    this.sendSyncReveal = null;
+    this.peerToPlayerId.clear();
+    this.hasAnnouncedJoin = false;
+  }
 
-      // Register message channels
-      const [sendSync, getSync] = this.p2pRoom.makeAction('SYNC_STATE');
-      const [sendAction, getAction] = this.p2pRoom.makeAction('PLAYER_ACTION');
-      const [sendPeek, getPeek] = this.p2pRoom.makeAction('PRIVATE_PEEK');
-      const [sendReveal, getReveal] = this.p2pRoom.makeAction('SYNC_REVEAL');
+  private initP2P(roomCode: string, asHost: boolean): void {
+    try {
+      const room = joinRoom({ appId: APP_ID }, roomCode);
+      this.p2pRoom = room;
 
-      this.sendSyncState = sendSync;
-      this.sendPlayerAction = sendAction;
-      this.sendPrivatePeek = sendPeek;
-      this.sendSyncReveal = sendReveal;
+      const syncAction = room.makeAction<any>('SYNC_STATE');
+      const playerAction = room.makeAction<any>('PLAYER_ACTION');
+      const revealAction = room.makeAction<any>('SYNC_REVEAL');
 
-      getReveal((data: { cardId: string; durationMs: number }) => {
+      this.sendSyncState = (data: GameState) => syncAction.send(data).catch(() => {});
+      this.sendPlayerAction = (data: any) => playerAction.send(data).catch(() => {});
+      this.sendSyncReveal = (data: { cardId: string; durationMs: number }) =>
+        revealAction.send(data).catch(() => {});
+
+      revealAction.onMessage = (data: { cardId: string; durationMs: number }) => {
+        this.sound.playCardFlip();
         this.temporaryRevealCard(data.cardId, data.durationMs);
-      });
+      };
 
-      // Handle peer joins
-      this.p2pRoom.onPeerJoin((peerId: string) => {
-        this.addLog(`Remote peer joined room: ${peerId.substring(0, 5)}`, 'info');
-        if (this.isHost()) {
+      room.onPeerJoin = (peerId: string) => {
+        if (asHost) {
           this.broadcastState();
+        } else {
+          // Non-host announces its join as soon as a peer (the host) is discovered
+          this.sendPlayerAction?.({
+            type: 'JOIN',
+            playerId: this.localPlayerId(),
+            name: this.localPlayerName()
+          });
+          this.hasAnnouncedJoin = true;
         }
-      });
+      };
 
-      // Handle peer leaves
-      this.p2pRoom.onPeerLeave((peerId: string) => {
-        this.addLog(`Peer disconnected: ${peerId.substring(0, 5)}`, 'warning');
-      });
+      room.onPeerLeave = (peerId: string) => {
+        const mappedPlayerId = this.peerToPlayerId.get(peerId);
+        if (asHost && mappedPlayerId) {
+          const p = this.state().players.find(x => x.id === mappedPlayerId);
+          this.addLog(`${p?.name || 'Operative'} disconnected.`, 'warning');
+          if (this.state().phase === 'LOBBY') {
+            this.removePlayer(mappedPlayerId);
+          } else {
+            this.state.update(curr => ({
+              ...curr,
+              players: curr.players.map(x => x.id === mappedPlayerId ? { ...x, connected: false } : x)
+            }));
+            this.broadcastState();
+          }
+        }
+      };
 
-      // Listen for incoming state sync
-      getSync((remoteState: GameState) => {
+      syncAction.onMessage = (remoteState: GameState) => {
         if (!this.isHost()) {
           this.state.set(remoteState);
+          // Ensure host registered us in the player list
+          const amInRoster = remoteState.players.some(p => p.id === this.localPlayerId());
+          if (!amInRoster && remoteState.phase === 'LOBBY' && !this.hasAnnouncedJoin) {
+            this.sendPlayerAction?.({
+              type: 'JOIN',
+              playerId: this.localPlayerId(),
+              name: this.localPlayerName()
+            });
+            this.hasAnnouncedJoin = true;
+          }
         }
-      });
+      };
 
-      // Host receives player action requests
-      getAction((action: any, senderId: string) => {
+      playerAction.onMessage = (action: any, context: { peerId: string }) => {
         if (this.isHost()) {
-          this.handleRemoteAction(action, senderId);
+          this.handleRemoteAction(action, context.peerId);
         }
-      });
-
-      // Private peek channel
-      getPeek((peekData: { card: Card; ownerName: string; slotIndex: number }) => {
-        this.sound.playCardFlip();
-        this.temporaryRevealCard(peekData.card.id, 3000);
-      });
+      };
     } catch (err) {
       console.warn('P2P connection initialized in local standalone mode', err);
     }
   }
 
   private broadcastState(): void {
-    if (this.sendSyncState) {
+    if (this.sendSyncState && this.isHost()) {
       this.sendSyncState(this.state());
     }
   }
 
   private handleRemoteAction(action: any, senderId: string): void {
+    const actorId = action.playerId || senderId;
+
     switch (action.type) {
       case 'JOIN': {
+        this.peerToPlayerId.set(senderId, actorId);
         const current = this.state().players;
-        if (current.length < 8 && !current.some(p => p.id === senderId)) {
+        if (this.state().phase !== 'LOBBY') return;
+
+        const existing = current.find(p => p.id === actorId);
+        if (existing) {
+          this.state.update(s => ({
+            ...s,
+            players: s.players.map(p => p.id === actorId ? { ...p, connected: true, name: action.name || p.name } : p)
+          }));
+          this.broadcastState();
+        } else if (current.length < 8) {
           const newPlayer: Player = {
-            id: senderId,
-            name: action.name || 'Netrunner_' + senderId.substring(0, 4),
-            avatar: 'cyber-3',
+            id: actorId,
+            name: action.name || 'Operative_' + actorId.slice(-4),
+            avatar: `cyber-${(current.length % 4) + 1}`,
             cards: [],
             isHost: false,
             isBot: false,
@@ -1069,156 +1445,75 @@ export class GameService {
             hasPeekedInitial: false,
             score: 0
           };
-          this.state.update(s => ({ ...s, players: [...s.players, newPlayer] }));
+          this.state.update(s => ({
+            ...s,
+            players: [...s.players, newPlayer],
+            logs: [...s.logs, {
+              id: Math.random().toString(),
+              timestamp: Date.now(),
+              message: `${newPlayer.name} connected to the lobby.`,
+              type: 'info'
+            }]
+          }));
           this.broadcastState();
         }
+        break;
+      }
+      case 'UPDATE_NAME': {
+        this.state.update(s => ({
+          ...s,
+          players: s.players.map(p => p.id === actorId ? { ...p, name: action.name } : p)
+        }));
+        this.broadcastState();
         break;
       }
       case 'CONFIRM_PEEK': {
         this.state.update(s => ({
           ...s,
-          players: s.players.map(p => p.id === action.playerId ? { ...p, hasPeekedInitial: true } : p)
+          players: s.players.map(p => p.id === actorId ? { ...p, hasPeekedInitial: true } : p)
         }));
         this.checkAndStartTurns();
+        this.broadcastState();
         break;
       }
       case 'DRAW_DECK': {
-        if (this.state().currentTurnPlayerId === action.playerId) {
-          if (this.canonicalDeck.length === 0) this.recycleDiscardPile();
-          const drawn = this.canonicalDeck.pop();
-          if (drawn) {
-            this.state.update(s => ({
-              ...s,
-              drawnCard: drawn,
-              drawPileCount: this.canonicalDeck.length
-            }));
-            this.broadcastState();
-          }
-        }
+        this.performDrawDeck(actorId);
         break;
       }
       case 'DRAW_DISCARD': {
-        if (this.state().currentTurnPlayerId === action.playerId && this.state().discardPile.length > 0) {
-          const discard = [...this.state().discardPile];
-          const drawn = discard.pop()!;
-          this.state.update(s => ({
-            ...s,
-            drawnCard: drawn,
-            discardPile: discard
-          }));
-          this.broadcastState();
-        }
+        this.performDrawDiscard(actorId);
         break;
       }
       case 'REPLACE_HAND': {
-        const drawn = this.state().drawnCard;
-        if (drawn && this.state().currentTurnPlayerId === action.playerId) {
-          const players = [...this.state().players];
-          const p = players.find(x => x.id === action.playerId);
-          if (p) {
-            const oldCard = p.cards[action.slotIndex];
-            p.cards[action.slotIndex] = drawn;
-            this.state.update(s => ({
-              ...s,
-              players,
-              drawnCard: null,
-              discardPile: [...s.discardPile, oldCard]
-            }));
-            this.finishTurn();
-          }
-        }
+        this.performReplaceHand(actorId, action.slotIndex);
         break;
       }
       case 'DISCARD_DRAWN': {
-        const drawn = this.state().drawnCard;
-        if (drawn && this.state().currentTurnPlayerId === action.playerId) {
-          this.state.update(s => ({
-            ...s,
-            drawnCard: null,
-            discardPile: [...s.discardPile, drawn]
-          }));
-          if (drawn.action !== 'NONE') {
-            this.triggerCardAction(drawn, action.playerId);
-          } else {
-            this.finishTurn();
-          }
-        }
+        this.performDiscardDrawn(actorId);
         break;
       }
       case 'CALL_CAMBIO': {
-        if (this.state().currentTurnPlayerId === action.playerId && this.state().cambioCallerId === null) {
-          const caller = this.state().players.find(p => p.id === action.playerId);
-          const remainingTurns = this.state().players.length - 1;
-          this.sound.playCambioAlert();
-          this.state.update(s => ({
-            ...s,
-            cambioCallerId: action.playerId,
-            finalTurnsRemaining: remainingTurns,
-            logs: [...s.logs, {
-              id: Math.random().toString(),
-              timestamp: Date.now(),
-              message: `🚨 ${caller?.name || 'A player'} CALLED CAMBIO!`,
-              type: 'cambio'
-            }]
-          }));
-          this.broadcastState();
-          this.finishTurn();
-        }
+        this.performCallCambio(actorId);
         break;
       }
-      case 'SNAP': {
-        const players = [...this.state().players];
-        const p = players.find(x => x.id === action.playerId);
-        const topDiscard = this.state().discardPile[this.state().discardPile.length - 1];
-        if (p && topDiscard) {
-          const clickedCard = p.cards[action.slotIndex];
-          if (clickedCard && clickedCard.rank === topDiscard.rank) {
-            p.cards.splice(action.slotIndex, 1);
-            this.sound.playSnap();
-            this.state.update(s => ({
-              ...s,
-              players,
-              discardPile: [...s.discardPile, clickedCard],
-              logs: [...s.logs, {
-                id: Math.random().toString(),
-                timestamp: Date.now(),
-                message: `⚡ SNAP SUCCESS! ${p.name} matched rank ${topDiscard.label} and shed a card!`,
-                type: 'snap'
-              }]
-            }));
-            this.broadcastState();
-          } else {
-            this.sound.playActionPower();
-            const penaltyCard = this.canonicalDeck.pop();
-            if (penaltyCard) {
-              p.cards.push(penaltyCard);
-              this.state.update(s => ({
-                ...s,
-                players,
-                drawPileCount: this.canonicalDeck.length,
-                logs: [...s.logs, {
-                  id: Math.random().toString(),
-                  timestamp: Date.now(),
-                  message: `❌ SNAP PENALTY! ${p.name} slapped incorrectly and drew a penalty card (+1 card penalty)!`,
-                  type: 'danger'
-                }]
-              }));
-              this.broadcastState();
-            }
-          }
-        }
+      case 'RESOLVE_PEEK_ACTION': {
+        this.performResolvePeek(actorId, action.targetPlayerId, action.slotIndex, action.actionType);
+        break;
+      }
+      case 'SKIP_ACTION': {
+        this.performSkipAction(actorId);
         break;
       }
       case 'CARD_CLICK_MATCH': {
-        this.processCardMatchOrPenalty(action.clickerId, action.targetPlayerId, action.slotIndex);
+        this.processCardMatchOrPenalty(action.clickerId || actorId, action.targetPlayerId, action.slotIndex);
         break;
       }
       case 'TRANSFER_CARD': {
-        this.transferCardToPlayer(action.fromPlayerId, action.cardIndex, action.toPlayerId);
+        this.transferCardToPlayer(action.fromPlayerId || actorId, action.cardIndex, action.toPlayerId);
         break;
       }
       case 'EXECUTE_SWAP': {
-        this.executeSwap(action.p1Id, action.idx1, action.p2Id, action.idx2);
+        this.executeSwap(action.p1Id, action.idx1, action.p2Id, action.idx2, action.actorId || actorId);
         break;
       }
     }

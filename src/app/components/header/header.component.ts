@@ -56,6 +56,11 @@ import { SoundService } from '../../services/sound.service';
         <button class="rules-btn" (click)="openRules.emit()">
           <span>📖 RULES</span>
         </button>
+
+        <!-- LEAVE ROOM BUTTON -->
+        <button class="leave-btn" *ngIf="gameService.state().roomCode" (click)="gameService.leaveRoom()" title="Leave room">
+          🚪 EXIT
+        </button>
       </div>
     </header>
   `,
@@ -209,7 +214,7 @@ import { SoundService } from '../../services/sound.service';
       box-shadow: 0 0 10px var(--color-primary-glow);
     }
 
-    .icon-btn, .rules-btn {
+    .icon-btn, .rules-btn, .leave-btn {
       background: var(--color-surface-elevated);
       border: 1px solid var(--color-border);
       color: var(--color-text);
@@ -226,6 +231,12 @@ import { SoundService } from '../../services/sound.service';
       border-color: var(--color-primary);
       color: var(--color-primary);
       box-shadow: 0 0 10px var(--color-primary-glow);
+    }
+
+    .leave-btn:hover {
+      border-color: var(--color-danger);
+      color: var(--color-danger);
+      box-shadow: 0 0 10px rgba(255, 23, 68, 0.35);
     }
   `]
 })

@@ -99,9 +99,9 @@ import { ThemeService } from '../../services/theme.service';
           </section>
 
           <section class="rule-section">
-            <h3>🚨 CALLING CAMBIO (EXTRACTION)</h3>
+            <h3>🚨 CALLING CAMBIO & FREEZING CARDS</h3>
             <p>
-              At the start of your turn, before drawing, you can shout <strong>CAMBIO</strong> if you believe you have the lowest score. Every other player gets <strong>one final turn</strong>, then all cards are flipped. Lowest total score wins!
+              At the start of your turn, before drawing, you can call <strong>CAMBIO</strong> if you believe you have the lowest score. Your cards immediately <strong>freeze</strong> (locked from play). Every other player gets <strong>one final pass</strong>, and as each player finishes their turn, their cards are <strong>frozen</strong> too. Once all players are frozen, cards flip face-up and the lowest score wins!
             </p>
           </section>
         </div>

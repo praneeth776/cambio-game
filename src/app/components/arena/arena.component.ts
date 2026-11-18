@@ -1,4 +1,4 @@
-import { Component, computed } from '@angular/core';
+import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { CardComponent } from '../card/card.component';
 import { GameService } from '../../services/game.service';
@@ -22,7 +22,7 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
           <span class="siren">🚨</span>
           <div class="banner-text">
             <strong>{{ themeService.currentTheme().labels.cambioWarning }}</strong>
-            <span>FINAL TURNS REMAINING: {{ gameService.state().finalTurnsRemaining }}</span>
+            <span>FINAL PASSES REMAINING: {{ gameService.state().finalTurnsRemaining }}</span>
           </div>
           <span class="siren">🚨</span>
         </div>
@@ -33,7 +33,7 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
             <span class="directive-icon">⚡</span>
             <span class="directive-text">{{ action.message }}</span>
             <button 
-              *ngIf="action.sourcePlayerId === gameService.localPlayerId()" 
+              *ngIf="action.sourcePlayerId === gameService.localPlayerId() && action.type !== 'TRANSFER_CARD_TO_OPPONENT'" 
               class="skip-btn" 
               (click)="gameService.skipAction()">
               SKIP POWER
@@ -46,17 +46,21 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
           <div 
             class="opponent-mat" 
             *ngFor="let opp of gameService.otherPlayers()"
-            [class.active-turn]="opp.id === gameService.state().currentTurnPlayerId">
+            [class.active-turn]="opp.id === gameService.state().currentTurnPlayerId && !gameService.isPlayerFrozen(opp.id)"
+            [class.frozen-mat]="gameService.isPlayerFrozen(opp.id)"
+            [class.disconnected]="!opp.connected">
             
             <div class="opponent-hud">
               <span class="opp-avatar">{{ opp.isBot ? '🤖' : '👤' }}</span>
               <span class="opp-name">{{ opp.name }}</span>
-              <span class="opp-cards-badge">({{ opp.cards.length }} chips)</span>
-              <span class="turn-indicator" *ngIf="opp.id === gameService.state().currentTurnPlayerId">TURN</span>
+              <span class="opp-cards-badge">({{ opp.cards.length }})</span>
+              <span class="frozen-badge" *ngIf="gameService.isPlayerFrozen(opp.id)">❄️ FROZEN</span>
+              <span class="turn-indicator" *ngIf="opp.id === gameService.state().currentTurnPlayerId && !gameService.isPlayerFrozen(opp.id) && gameService.state().phase === 'PLAYING'">TURN</span>
+              <span class="offline-badge" *ngIf="!opp.connected">OFFLINE</span>
             </div>
 
-            <!-- Opponent Cards (CLOSED face-down during active game; click to peek/match!) -->
-            <div class="opponent-cards-grid">
+            <!-- Opponent Cards (CLOSED face-down during active game; click to match or resolve action) -->
+            <div class="opponent-cards-grid" [class.many-cards]="opp.cards.length > 4">
               <div 
                 *ngFor="let c of opp.cards; let idx = index" 
                 class="opp-card-slot"
@@ -66,8 +70,13 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
                   [isFaceUp]="isCardFaceUp(opp.id, idx, c)"
                   [isTemporarilyOpen]="gameService.isCardTemporarilyOpen(c.id)"
                   [isSelectable]="isCardSelectable(opp.id, idx)"
+                  [isSelected]="isCardSelected(opp.id, idx)"
+                  [isFrozen]="gameService.isPlayerFrozen(opp.id)"
                   [slotIndex]="idx">
                 </app-card>
+              </div>
+              <div class="no-cards-badge" *ngIf="opp.cards.length === 0">
+                0 CHIPS LEFT
               </div>
             </div>
           </div>
@@ -84,7 +93,7 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
                 <div class="deck-card-layer layer-3"></div>
                 <div class="deck-card-layer layer-2"></div>
                 <div class="deck-card-layer layer-1">
-                  <app-card [isFaceUp]="false" [isSelectable]="canDrawFromDeck"></app-card>
+                  <app-card [isFaceUp]="false" [isSelectable]="canDrawFromDeck" [disabled]="!canDrawFromDeck"></app-card>
                 </div>
               </div>
               <div class="pile-count">{{ gameService.state().drawPileCount }} left</div>
@@ -98,7 +107,8 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
                   *ngIf="topDiscardCard" 
                   [card]="topDiscardCard" 
                   [isFaceUp]="true" 
-                  [isSelectable]="canDrawFromDiscard">
+                  [isSelectable]="canDrawFromDiscard"
+                  [disabled]="!canDrawFromDiscard">
                 </app-card>
                 <div class="empty-discard" *ngIf="!topDiscardCard">
                   <span>EMPTY CACHE</span>
@@ -109,11 +119,13 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
 
           </div>
 
-          <!-- DRAWN CARD ACTION MODAL / HUD -->
-          <div class="drawn-hud" *ngIf="gameService.state().drawnCard as drawn">
+          <!-- DRAWN CARD ACTION HUD (ONLY SHOWN TO ACTIVE PLAYER) -->
+          <div class="drawn-hud" *ngIf="gameService.isMyTurn() && gameService.state().drawnCard as drawn">
             <div class="drawn-header">
-              <span class="drawn-tag">CURRENTLY HOLDING:</span>
-              <h3>{{ drawn.label }} of {{ drawn.suit }} ({{ drawn.pointValue }} pts)</h3>
+              <span class="drawn-tag">
+                {{ gameService.state().drawnSource === 'DISCARD' ? 'TAKEN FROM BURN CACHE:' : 'DRAWN FROM BUFFER:' }}
+              </span>
+              <h3>{{ formatCardTitle(drawn) }}</h3>
             </div>
             
             <div class="drawn-preview">
@@ -121,26 +133,53 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
             </div>
 
             <div class="drawn-actions">
-              <button class="drawn-btn discard" (click)="gameService.discardDrawnCard()">
+              <button 
+                *ngIf="gameService.state().drawnSource === 'DECK'" 
+                class="drawn-btn discard" 
+                (click)="gameService.discardDrawnCard()">
                 🗑️ DISCARD DRAWN CARD
-                <small *ngIf="drawn.action !== 'NONE'">Activates {{ drawn.action }} power!</small>
+                <small *ngIf="drawn.action !== 'NONE'">Activates {{ formatActionName(drawn.action) }} power!</small>
               </button>
-              <p class="swap-hint">OR: Click one of your face-down chips below to replace it!</p>
+              <p class="swap-hint" *ngIf="gameService.state().drawnSource === 'DECK'">
+                OR: Click one of your face-down chips below to swap & discard the old one!
+              </p>
+              <p class="swap-hint mandatory" *ngIf="gameService.state().drawnSource === 'DISCARD'">
+                ⚠️ Click one of your chips below to swap it into your hand!
+              </p>
             </div>
+          </div>
+
+          <!-- OPPONENT HOLDING DRAWN CARD NOTICE (NO CARD LEAK) -->
+          <div class="opponent-thinking-pill" *ngIf="!gameService.isMyTurn() && gameService.state().drawnCard !== null">
+            ⏳ {{ currentTurnPlayerName }} drew a card and is choosing a move...
           </div>
 
         </div>
 
         <!-- 3. LOCAL PLAYER HAND (BOTTOM PROMINENT AREA) -->
-        <div class="local-player-area" *ngIf="gameService.localPlayer() as me" [class.my-turn]="gameService.isMyTurn()">
+        <div 
+          class="local-player-area" 
+          *ngIf="gameService.localPlayer() as me" 
+          [class.my-turn]="gameService.isMyTurn()"
+          [class.frozen-mat]="gameService.isLocalFrozen()">
           
           <div class="local-hud">
             <div class="hud-left">
-              <span class="my-avatar">👑</span>
+              <span class="my-avatar">{{ gameService.isLocalFrozen() ? '❄️' : '👑' }}</span>
               <div>
                 <span class="my-name">{{ me.name }} (YOU) • {{ me.cards.length }} cards</span>
-                <span class="my-status" *ngIf="gameService.isMyTurn()">🟢 YOUR TURN</span>
-                <span class="my-status waiting" *ngIf="!gameService.isMyTurn()">⏳ WAITING FOR RIVALS</span>
+                <span class="my-status frozen" *ngIf="gameService.isLocalFrozen()">
+                  ❄️ HAND FROZEN — WAITING FOR SHOWDOWN
+                </span>
+                <span class="my-status" *ngIf="!gameService.isLocalFrozen() && gameService.isMyTurn()">
+                  🟢 {{ turnHintText }}
+                </span>
+                <span class="my-status waiting" *ngIf="!gameService.isLocalFrozen() && !gameService.isMyTurn() && gameService.state().phase === 'PLAYING'">
+                  ⏳ {{ currentTurnPlayerName }}'s turn (click any closed card to match discard!)
+                </span>
+                <span class="my-status waiting" *ngIf="gameService.state().phase === 'INITIAL_PEEK'">
+                  👁️ MEMORIZE YOUR BOTTOM TWO CARDS
+                </span>
               </div>
             </div>
 
@@ -148,15 +187,15 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
               <!-- CALL CAMBIO BUTTON -->
               <button 
                 class="cambio-action-btn"
-                [disabled]="!gameService.isMyTurn() || gameService.state().drawnCard !== null || gameService.state().cambioCallerId !== null"
+                [disabled]="!canCallCambio"
                 (click)="gameService.callCambio()">
                 ⚠️ {{ themeService.currentTheme().labels.cambioButton }}
               </button>
             </div>
           </div>
 
-          <!-- CARDS GRID: CLOSED FACE DOWN DURING PLAYING; CLICK TO PEEK/MATCH! -->
-          <div class="my-cards-grid">
+          <!-- CARDS GRID: CLOSED FACE DOWN DURING PLAYING; CLICK TO MATCH OR REPLACE! -->
+          <div class="my-cards-grid" [class.many-cards]="me.cards.length > 4">
             <div 
               class="my-card-slot" 
               *ngFor="let card of me.cards; let idx = index" 
@@ -167,9 +206,15 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
                 [isFaceUp]="isCardFaceUp(me.id, idx, card)"
                 [isTemporarilyOpen]="gameService.isCardTemporarilyOpen(card.id)"
                 [isSelectable]="isCardSelectable(me.id, idx)"
+                [isSelected]="isCardSelected(me.id, idx)"
                 [isPeeked]="isCardCurrentlyPeeked(card)"
+                [isFrozen]="gameService.isLocalFrozen()"
                 [slotIndex]="idx">
               </app-card>
+            </div>
+
+            <div class="no-cards-badge self" *ngIf="me.cards.length === 0">
+              🎉 0 CARDS LEFT (0 PTS!)
             </div>
           </div>
 
@@ -179,11 +224,18 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
               👁️ {{ themeService.currentTheme().labels.initialPeekPrompt }} (bottom row #3 & #4 are revealed).
             </p>
             <p class="peek-memory-warning">
-              ⚠️ Once you click Proceed, <strong>ALL CARDS WILL CLOSE</strong>! You must rely purely on your memory.
+              ⚠️ Once you proceed, <strong>ALL CARDS CLOSE</strong>! Keep them in memory.
             </p>
             <button class="confirm-peek-btn" (click)="gameService.confirmInitialPeek()">
               I'VE MEMORIZED MY CHIPS (CLOSE & START)
             </button>
+          </div>
+
+          <!-- WAITING FOR OTHER PLAYERS AFTER INITIAL PEEK -->
+          <div class="initial-peek-bar waiting" *ngIf="gameService.state().phase === 'INITIAL_PEEK' && me.hasPeekedInitial">
+            <p class="peek-instruction">
+              ✓ Chips memorized & locked! Waiting for remaining operatives to confirm...
+            </p>
           </div>
 
         </div>
@@ -224,27 +276,17 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
         </div>
       </aside>
 
-      <!-- TEMPORARY PEEK HUD OVERLAY (When peeking a card via 7/8/9/10) -->
-      <div class="peek-overlay" *ngIf="gameService.activePeek() as peek">
-        <div class="peek-card-modal">
-          <div class="peek-badge">👁️ TEMPORARY PEEK // MEMORIZE QUICKLY</div>
-          <h4>{{ peek.ownerName }}'s Card #{{ peek.slotIndex + 1 }}</h4>
-          <app-card [card]="peek.card" [isFaceUp]="true"></app-card>
-          <div class="peek-timer">Closing back face-down in 3s...</div>
-        </div>
-      </div>
-
       <!-- GAME OVER SUMMARY MODAL -->
       <div class="game-over-modal" *ngIf="gameService.state().phase === 'GAME_OVER'">
         <div class="game-over-content">
           <h2 class="victory-title">🏆 {{ themeService.currentTheme().labels.victoryTitle }}</h2>
-          <p class="victory-subtitle">All cards flipped face-up! Final scores:</p>
+          <p class="victory-subtitle">All cards decrypted! Lowest total score wins:</p>
 
           <div class="scores-table">
             <div 
               class="score-row" 
               *ngFor="let p of sortedPlayers(); let rank = index"
-              [class.winner]="rank === 0">
+              [class.winner]="p.score === lowestScore()">
               <span class="rank-pos">#{{ rank + 1 }}</span>
               <span class="p-name">{{ p.name }} {{ p.id === gameService.localPlayerId() ? '(YOU)' : '' }}</span>
               <span class="card-count">{{ p.cards.length }} cards</span>
@@ -253,8 +295,11 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
           </div>
 
           <div class="game-over-actions">
-            <button class="btn-play-again" (click)="onPlayAgain()">
-              START NEW MATCH
+            <button *ngIf="gameService.isHost()" class="btn-play-again" (click)="onPlayAgain()">
+              🔄 START NEW MATCH
+            </button>
+            <button class="btn-return-lobby" (click)="gameService.returnToLobby()">
+              {{ gameService.isHost() ? '🏠 BACK TO LOBBY' : '🚪 LEAVE TO LOBBY' }}
             </button>
           </div>
         </div>
@@ -283,7 +328,6 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       }
     }
 
-    /* MAIN TABLE COLUMN */
     .arena-main {
       flex: 1;
       display: flex;
@@ -304,7 +348,7 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       flex-direction: column;
       box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
       overflow: hidden;
-      max-height: 400px;
+      max-height: 360px;
     }
 
     @media (min-width: 1024px) {
@@ -379,7 +423,6 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       display: flex;
       flex-direction: column;
       gap: 4px;
-      transition: all 0.2s;
       animation: slideIn 0.25s ease;
     }
 
@@ -415,7 +458,6 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       word-break: break-word;
     }
 
-    /* Log Type Highlights */
     .update-item.log-danger {
       border-left-color: var(--color-danger);
       background: rgba(255, 23, 68, 0.12);
@@ -450,6 +492,15 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
     .update-item.log-action .log-badge {
       background: rgba(0, 240, 255, 0.2);
       color: var(--color-primary);
+    }
+
+    .update-item.log-warning {
+      border-left-color: var(--color-warning);
+      background: rgba(255, 171, 0, 0.1);
+    }
+    .update-item.log-warning .log-badge {
+      background: var(--color-warning);
+      color: #0b0f19;
     }
 
     .update-item.log-info .log-badge {
@@ -567,9 +618,22 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       transform: translateY(-4px);
     }
 
+    .opponent-mat.frozen-mat,
+    .local-player-area.frozen-mat {
+      border-color: #7dd3fc !important;
+      box-shadow: 0 0 18px rgba(125, 211, 252, 0.28) !important;
+      background: linear-gradient(180deg, rgba(56, 189, 248, 0.08) 0%, var(--color-surface, #111422) 100%);
+    }
+
+    .opponent-mat.disconnected {
+      opacity: 0.6;
+    }
+
     .opponent-hud {
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
       gap: 6px;
       font-size: 12px;
       font-weight: bold;
@@ -580,6 +644,25 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
     .opp-cards-badge {
       font-size: 10px;
       color: var(--color-text-muted);
+    }
+
+    .frozen-badge {
+      background: rgba(125, 211, 252, 0.2);
+      border: 1px solid #7dd3fc;
+      color: #7dd3fc;
+      font-size: 9px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 900;
+      letter-spacing: 0.5px;
+    }
+
+    .offline-badge {
+      background: rgba(255, 23, 68, 0.2);
+      color: var(--color-danger);
+      font-size: 9px;
+      padding: 2px 5px;
+      border-radius: 4px;
     }
 
     .turn-indicator {
@@ -597,10 +680,25 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       gap: 6px;
     }
 
+    .opponent-cards-grid.many-cards {
+      grid-template-columns: repeat(3, 1fr);
+    }
+
     .opp-card-slot {
       transform: scale(0.72);
       transform-origin: center center;
       margin: -14px -10px;
+    }
+
+    .no-cards-badge {
+      grid-column: 1 / -1;
+      padding: 12px 16px;
+      font-size: 11px;
+      font-weight: 900;
+      color: var(--color-success);
+      border: 1px dashed var(--color-success);
+      border-radius: 8px;
+      text-align: center;
     }
 
     /* CENTER TABLE */
@@ -646,6 +744,9 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
 
     .deck-stack {
       position: relative;
+    }
+
+    .deck-stack.can-draw {
       cursor: pointer;
     }
 
@@ -674,6 +775,9 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       display: flex;
       align-items: center;
       justify-content: center;
+    }
+
+    .discard-stack.can-draw {
       cursor: pointer;
     }
 
@@ -759,6 +863,22 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       color: var(--color-text-muted);
       margin: 0;
       font-family: var(--font-main);
+      text-align: center;
+    }
+
+    .swap-hint.mandatory {
+      color: var(--color-accent);
+      font-weight: bold;
+    }
+
+    .opponent-thinking-pill {
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+      font-size: 12px;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-family: var(--font-main);
     }
 
     /* LOCAL PLAYER AREA */
@@ -784,6 +904,8 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       display: flex;
       justify-content: space-between;
       align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
       font-family: var(--font-main);
     }
 
@@ -812,6 +934,10 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
 
     .my-status.waiting {
       color: var(--color-text-muted);
+    }
+
+    .my-status.frozen {
+      color: #7dd3fc;
     }
 
     .cambio-action-btn {
@@ -846,30 +972,15 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       justify-items: center;
     }
 
+    .my-cards-grid.many-cards {
+      grid-template-columns: repeat(3, 1fr);
+    }
+
     .my-card-slot {
       display: flex;
       flex-direction: column;
       align-items: center;
       gap: 6px;
-    }
-
-    .snap-btn {
-      background: rgba(0, 240, 255, 0.1);
-      border: 1px solid var(--color-primary);
-      color: var(--color-primary);
-      font-size: 10px;
-      font-weight: 900;
-      padding: 3px 8px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-family: var(--font-main);
-      transition: all 0.2s;
-    }
-
-    .snap-btn:hover {
-      background: var(--color-primary);
-      color: #0b0f19;
-      box-shadow: 0 0 10px var(--color-primary-glow);
     }
 
     /* INITIAL PEEK BAR */
@@ -879,6 +990,10 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       border-radius: 8px;
       padding: 12px;
       text-align: center;
+    }
+
+    .initial-peek-bar.waiting {
+      border-color: var(--color-primary);
     }
 
     .peek-instruction {
@@ -906,48 +1021,6 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       cursor: pointer;
       font-family: var(--font-main);
       box-shadow: 0 0 15px rgba(255, 230, 0, 0.35);
-    }
-
-    /* PEEK OVERLAY */
-    .peek-overlay {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      background: rgba(0, 0, 0, 0.85);
-      backdrop-filter: blur(4px);
-      z-index: 1000;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .peek-card-modal {
-      background: var(--color-surface-elevated);
-      border: 2px solid var(--color-primary);
-      padding: 24px;
-      border-radius: 16px;
-      text-align: center;
-      box-shadow: 0 0 40px var(--color-primary-glow);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 12px;
-      font-family: var(--font-main);
-    }
-
-    .peek-badge {
-      font-size: 11px;
-      font-weight: 900;
-      color: var(--color-primary);
-      letter-spacing: 1.5px;
-    }
-
-    .peek-timer {
-      font-size: 11px;
-      color: var(--color-accent);
-      font-weight: bold;
     }
 
     /* GAME OVER MODAL */
@@ -1026,6 +1099,12 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       color: var(--color-accent);
     }
 
+    .game-over-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
     .btn-play-again {
       width: 100%;
       background: linear-gradient(135deg, var(--color-primary) 0%, #0088cc 100%);
@@ -1038,6 +1117,24 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       cursor: pointer;
       font-family: var(--font-main);
       letter-spacing: 1px;
+    }
+
+    .btn-return-lobby {
+      width: 100%;
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      font-size: 13px;
+      font-weight: bold;
+      padding: 11px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-family: var(--font-main);
+    }
+
+    .btn-return-lobby:hover {
+      border-color: var(--color-primary);
+      color: var(--color-primary);
     }
   `]
 })
@@ -1068,12 +1165,67 @@ export class ArenaComponent {
     return discard.length > 0 ? discard[discard.length - 1] : null;
   }
 
+  get currentTurnPlayerName(): string {
+    const s = this.gameService.state();
+    return s.players.find(p => p.id === s.currentTurnPlayerId)?.name || 'Operative';
+  }
+
   get canDrawFromDeck(): boolean {
-    return this.gameService.isMyTurn() && this.gameService.state().drawnCard === null;
+    const s = this.gameService.state();
+    return this.gameService.isMyTurn() && s.drawnCard === null && s.activeAction === null;
   }
 
   get canDrawFromDiscard(): boolean {
-    return this.gameService.isMyTurn() && this.gameService.state().drawnCard === null && this.gameService.state().discardPile.length > 0;
+    const s = this.gameService.state();
+    return this.gameService.isMyTurn() && s.drawnCard === null && s.activeAction === null && s.discardPile.length > 0;
+  }
+
+  get canCallCambio(): boolean {
+    const s = this.gameService.state();
+    return (
+      this.gameService.isMyTurn() &&
+      s.drawnCard === null &&
+      s.activeAction === null &&
+      s.cambioCallerId === null
+    );
+  }
+
+  get turnHintText(): string {
+    const s = this.gameService.state();
+    if (s.activeAction && s.activeAction.sourcePlayerId === this.gameService.localPlayerId()) {
+      return s.activeAction.message;
+    }
+    if (s.drawnCard) {
+      return s.drawnSource === 'DISCARD'
+        ? 'YOUR TURN — Click a card below to swap with taken discard'
+        : 'YOUR TURN — Discard drawn card OR click a card below to swap';
+    }
+    if (s.cambioCallerId !== null) {
+      return 'FINAL PASS — Draw from deck/discard before your hand freezes!';
+    }
+    return 'YOUR TURN — Draw from Buffer/Cache, or Call Cambio';
+  }
+
+  formatCardTitle(card: Card): string {
+    if (card.suit === 'joker') {
+      return `Joker (${card.pointValue} pts)`;
+    }
+    const suitCap = card.suit.charAt(0).toUpperCase() + card.suit.slice(1);
+    const rankLabel =
+      card.label === 'A' ? 'Ace' :
+      card.label === 'J' ? 'Jack' :
+      card.label === 'Q' ? 'Queen' :
+      card.label === 'K' ? 'King' : card.label;
+    return `${rankLabel} of ${suitCap} (${card.pointValue} ${card.pointValue === 1 || card.pointValue === -1 ? 'pt' : 'pts'})`;
+  }
+
+  formatActionName(action: Card['action']): string {
+    switch (action) {
+      case 'PEEK_OWN': return this.themeService.currentTheme().labels.actions.peekSelf;
+      case 'PEEK_OTHER': return this.themeService.currentTheme().labels.actions.peekOther;
+      case 'SWAP': return this.themeService.currentTheme().labels.actions.blindSwap;
+      default: return '';
+    }
   }
 
   onDrawDeckClicked(): void {
@@ -1092,50 +1244,79 @@ export class ArenaComponent {
     this.gameService.handleCardClick(targetPlayerId, slotIndex);
   }
 
-  /**
-   * PURE MEMORY RULE:
-   * Cards are ONLY face-up:
-   * 1. At GAME_OVER (all revealed).
-   * 2. When temporarily peeked (3-second countdown timer).
-   * 3. During INITIAL_PEEK phase, local player's bottom 2 cards (#3 and #4) are face up for memorization.
-   * 4. IN ALL OTHER MOMENTS, ALL CARDS ARE CLOSED / FACE DOWN!
-   */
   isCardFaceUp(playerId: string, slotIndex: number, card: Card): boolean {
-    const phase = this.gameService.state().phase;
-    
-    // 1. All revealed at GAME_OVER
-    if (phase === 'GAME_OVER') return true;
-
-    // 2. Temporarily open via peek function (3s timer)
+    const s = this.gameService.state();
+    if (s.phase === 'GAME_OVER') return true;
     if (this.gameService.isCardTemporarilyOpen(card.id)) return true;
 
-    // 3. Only during INITIAL_PEEK for the local player's bottom 2 cards
-    if (phase === 'INITIAL_PEEK' && playerId === this.gameService.localPlayerId() && (slotIndex === 2 || slotIndex === 3)) {
+    const me = this.gameService.localPlayer();
+    if (
+      s.phase === 'INITIAL_PEEK' &&
+      !me?.hasPeekedInitial &&
+      playerId === this.gameService.localPlayerId() &&
+      (slotIndex === 2 || slotIndex === 3)
+    ) {
       return true;
     }
 
-    // 4. During active match play, cards are completely CLOSED!
     return false;
   }
 
   isCardCurrentlyPeeked(card: Card): boolean {
-    return this.gameService.isCardTemporarilyOpen(card.id) || this.gameService.activePeek()?.card.id === card.id;
+    return this.gameService.isCardTemporarilyOpen(card.id);
+  }
+
+  isCardSelected(playerId: string, slotIndex: number): boolean {
+    const action = this.gameService.state().activeAction;
+    if (!action || action.sourcePlayerId !== this.gameService.localPlayerId()) return false;
+    return (
+      action.type === 'SWAP_SELECT_SECOND' &&
+      action.targetPlayerId === playerId &&
+      action.firstCardIndex === slotIndex
+    );
   }
 
   isCardSelectable(playerId: string, slotIndex: number): boolean {
-    const phase = this.gameService.state().phase;
-    return phase === 'PLAYING' || phase === 'INITIAL_PEEK';
+    const s = this.gameService.state();
+    if (s.phase !== 'PLAYING') return false;
+    if (this.gameService.isLocalFrozen()) return false;
+    if (this.gameService.isPlayerFrozen(playerId)) return false;
+
+    const localId = this.gameService.localPlayerId();
+
+    if (s.drawnCard !== null) {
+      return this.gameService.isMyTurn() && playerId === localId;
+    }
+
+    if (s.activeAction !== null) {
+      if (s.activeAction.sourcePlayerId !== localId) return false;
+      switch (s.activeAction.type) {
+        case 'PEEK_OWN':
+        case 'TRANSFER_CARD_TO_OPPONENT':
+          return playerId === localId;
+        case 'PEEK_OTHER':
+          return playerId !== localId;
+        case 'SWAP_SELECT_FIRST':
+        case 'SWAP_SELECT_SECOND':
+          return true;
+      }
+    }
+
+    return true;
   }
 
   sortedPlayers(): Player[] {
     return [...this.gameService.state().players].sort((a, b) => a.score - b.score);
   }
 
+  lowestScore(): number {
+    const sorted = this.sortedPlayers();
+    return sorted[0]?.score ?? 0;
+  }
+
   onPlayAgain(): void {
     if (this.gameService.isHost()) {
       this.gameService.startGame();
-    } else {
-      this.gameService.state.update(s => ({ ...s, phase: 'LOBBY' }));
     }
   }
 }

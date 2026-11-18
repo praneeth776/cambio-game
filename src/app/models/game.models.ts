@@ -58,10 +58,12 @@ export interface GameState {
   players: Player[];
   currentTurnPlayerId: string;
   cambioCallerId: string | null;
+  frozenPlayerIds: string[];
   finalTurnsRemaining: number;
   drawPileCount: number;
   discardPile: Card[];
-  drawnCard: Card | null;  // Card currently drawn by active player (from deck)
+  drawnCard: Card | null;  // Card currently drawn by active player
+  drawnSource: 'DECK' | 'DISCARD' | null; // Track where drawnCard came from
   activeAction: ActiveAction | null;
   logs: GameLogEntry[];
 }

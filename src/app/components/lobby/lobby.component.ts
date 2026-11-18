@@ -27,7 +27,7 @@ import { ThemeService } from '../../services/theme.service';
               type="text" 
               class="cyber-input" 
               [(ngModel)]="playerName" 
-              (change)="updatePlayerName()"
+              (input)="updatePlayerName()"
               placeholder="e.g. Neo, Cipher, Alice" 
               maxlength="15" />
           </div>
@@ -48,6 +48,7 @@ import { ThemeService } from '../../services/theme.service';
               type="text" 
               class="room-code-input" 
               [(ngModel)]="joinCode" 
+              (keyup.enter)="onJoinRoom()"
               placeholder="ROOM CODE" 
               maxlength="6" />
             <button class="btn btn-secondary" [disabled]="!joinCode.trim()" (click)="onJoinRoom()">
@@ -508,8 +509,8 @@ export class LobbyComponent implements OnInit {
   ngOnInit(): void {
     this.playerName = this.gameService.localPlayerName();
 
-    // Auto join if room code is in query string
-    if (typeof window !== 'undefined') {
+    // Auto join if room code is in query string and not already in a room
+    if (typeof window !== 'undefined' && !this.gameService.state().roomCode) {
       const params = new URLSearchParams(window.location.search);
       const roomParam = params.get('room');
       if (roomParam) {
@@ -521,7 +522,7 @@ export class LobbyComponent implements OnInit {
 
   updatePlayerName(): void {
     if (this.playerName.trim()) {
-      this.gameService.localPlayerName.set(this.playerName.trim());
+      this.gameService.updateLocalName(this.playerName.trim());
     }
   }
 
