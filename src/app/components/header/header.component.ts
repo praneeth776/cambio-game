@@ -1,4 +1,4 @@
-import { Component, Output, EventEmitter } from '@angular/core';
+import { Component, Output, EventEmitter, HostListener, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ThemeService } from '../../services/theme.service';
 import { GameService } from '../../services/game.service';
@@ -11,144 +11,138 @@ import { SoundService } from '../../services/sound.service';
   template: `
     <header class="app-header">
       <div class="header-left">
-        <div class="logo-group">
-          <span class="game-icon">{{ themeService.currentTheme().icon }}</span>
-          <div>
-            <h1 class="logo-title">{{ themeService.currentTheme().labels.gameTitle }}</h1>
-            <p class="logo-tagline">{{ themeService.currentTheme().labels.tagline }}</p>
-          </div>
-        </div>
+        <span class="game-icon" aria-hidden="true">{{ themeService.currentTheme().icon }}</span>
+        <h1 class="logo-title">{{ themeService.currentTheme().labels.gameTitle }}</h1>
       </div>
 
-      <div class="header-center" *ngIf="gameService.state().roomCode">
-        <div class="room-pill" (click)="copyInviteLink()">
-          <span class="label">ROOM:</span>
+      <!-- Compact room pill ONLY during active match (Lobby shows its own invite card) -->
+      <div class="header-center" *ngIf="gameService.state().roomCode && gameService.state().phase !== 'LOBBY'">
+        <button class="room-pill" (click)="copyInviteLink()" [title]="copyNotification ? 'Copied!' : 'Copy Invite Link'">
           <span class="code">{{ gameService.state().roomCode }}</span>
-          <span class="copy-icon" [title]="copyNotification ? 'Copied!' : 'Copy Link'">{{ copyNotification ? '✓' : '🔗' }}</span>
-        </div>
-        <span class="player-count">
-          👥 {{ gameService.state().players.length }}/8 PLAYERS
-        </span>
+          <span class="copy-icon">{{ copyNotification ? '✓' : '🔗' }}</span>
+        </button>
+        <span class="player-count">{{ gameService.state().players.length }}/8</span>
       </div>
 
       <div class="header-right">
-        <!-- THEME SWITCHER -->
-        <div class="theme-switcher">
-          <label class="theme-label">THEME:</label>
-          <div class="theme-buttons">
-            <button 
+        <!-- COMPACT THEME DROPDOWN -->
+        <div class="theme-dropdown">
+          <button
+            class="ctrl-btn theme-trigger"
+            (click)="themeMenuOpen = !themeMenuOpen"
+            [attr.aria-expanded]="themeMenuOpen"
+            title="Switch theme">
+            <span>{{ themeService.currentTheme().icon }} {{ themeService.currentTheme().name }}</span>
+            <span class="caret">▾</span>
+          </button>
+
+          <div class="theme-menu" *ngIf="themeMenuOpen" role="menu">
+            <button
               *ngFor="let theme of themeService.getAvailableThemes()"
-              class="theme-btn" 
+              class="theme-option"
+              role="menuitem"
               [class.active]="theme.id === themeService.currentTheme().id"
-              (click)="themeService.setTheme(theme.id)"
-              [title]="theme.name">
-              {{ theme.icon }} {{ theme.name }}
+              (click)="selectTheme(theme.id)">
+              <span>{{ theme.icon }} {{ theme.name }}</span>
+              <span *ngIf="theme.id === themeService.currentTheme().id">✓</span>
             </button>
           </div>
         </div>
 
-        <!-- AUDIO TOGGLE -->
-        <button class="icon-btn" (click)="toggleAudio()" [title]="soundService.soundEnabled ? 'Mute' : 'Unmute'">
+        <button
+          class="ctrl-btn icon-only"
+          (click)="toggleAudio()"
+          [title]="soundService.soundEnabled ? 'Mute audio' : 'Unmute audio'"
+          [attr.aria-label]="soundService.soundEnabled ? 'Mute audio' : 'Unmute audio'">
           {{ soundService.soundEnabled ? '🔊' : '🔇' }}
         </button>
 
-        <!-- RULES MODAL TRIGGER -->
-        <button class="rules-btn" (click)="openRules.emit()">
-          <span>📖 RULES</span>
+        <button class="ctrl-btn" (click)="openRules.emit()">
+          📖 <span class="btn-lbl">Rules</span>
         </button>
 
-        <!-- LEAVE ROOM BUTTON -->
-        <button class="leave-btn" *ngIf="gameService.state().roomCode" (click)="gameService.leaveRoom()" title="Leave room">
-          🚪 EXIT
+        <button
+          class="ctrl-btn danger-hover"
+          *ngIf="gameService.state().roomCode"
+          (click)="gameService.leaveRoom()"
+          title="Leave room">
+          🚪 <span class="btn-lbl">Exit</span>
         </button>
       </div>
     </header>
   `,
   styles: [`
     .app-header {
+      height: var(--header-height, 56px);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      flex-wrap: wrap;
       gap: 12px;
-      padding: 12px 20px;
+      padding: 0 16px;
       background: var(--color-surface, #111422);
-      border-bottom: 2px solid var(--color-border, #1f2945);
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+      border-bottom: 1px solid var(--color-border, #1f2945);
       position: sticky;
       top: 0;
-      z-index: 100;
+      z-index: 200;
     }
 
-    .header-left .logo-group {
+    .header-left {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 8px;
+      min-width: 0;
     }
 
     .game-icon {
-      font-size: 28px;
-      filter: drop-shadow(0 0 8px var(--color-primary-glow));
+      font-size: 20px;
+      flex-shrink: 0;
     }
 
     .logo-title {
-      font-size: 16px;
+      font-size: 14px;
       font-weight: 900;
-      letter-spacing: 1.5px;
+      letter-spacing: 1px;
       color: var(--color-primary);
       margin: 0;
       text-transform: uppercase;
       font-family: var(--font-main);
-      text-shadow: 0 0 10px var(--color-primary-glow);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     @media (min-width: 768px) {
       .logo-title {
-        font-size: 19px;
+        font-size: 16px;
       }
-    }
-
-    .logo-tagline {
-      font-size: 11px;
-      color: var(--color-text-muted);
-      margin: 2px 0 0 0;
     }
 
     .header-center {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 6px;
+      flex-shrink: 0;
     }
 
     .room-pill {
       display: flex;
       align-items: center;
       gap: 6px;
-      background: rgba(0, 0, 0, 0.5);
-      border: 1px solid var(--color-primary);
-      padding: 5px 12px;
-      border-radius: 20px;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--color-border);
+      color: var(--color-primary);
+      padding: 4px 10px;
+      border-radius: 16px;
       cursor: pointer;
-      transition: all 0.2s ease;
+      font-family: var(--font-main);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 1.5px;
+      transition: border-color 0.15s ease, transform 0.15s ease;
     }
 
     .room-pill:hover {
-      box-shadow: 0 0 12px var(--color-primary-glow);
-      transform: scale(1.03);
-    }
-
-    .room-pill .label {
-      font-size: 10px;
-      color: var(--color-text-muted);
-      font-weight: bold;
-    }
-
-    .room-pill .code {
-      font-size: 14px;
-      font-weight: 900;
-      color: var(--color-primary);
-      letter-spacing: 2px;
-      font-family: var(--font-main);
+      border-color: var(--color-primary);
     }
 
     .player-count {
@@ -157,98 +151,138 @@ import { SoundService } from '../../services/sound.service';
       color: var(--color-text-muted);
       background: var(--color-surface-elevated);
       padding: 4px 8px;
-      border-radius: 6px;
+      border-radius: 12px;
       border: 1px solid var(--color-border);
     }
 
     .header-right {
       display: flex;
       align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
+      gap: 6px;
+      flex-shrink: 0;
     }
 
-    .theme-switcher {
-      display: flex;
+    .theme-dropdown {
+      position: relative;
+    }
+
+    .ctrl-btn {
+      display: inline-flex;
       align-items: center;
-      gap: 8px;
-    }
-
-    .theme-label {
-      font-size: 10px;
-      font-weight: bold;
-      color: var(--color-text-muted);
-      letter-spacing: 1px;
-    }
-
-    .theme-buttons {
-      display: flex;
-      gap: 4px;
-      background: rgba(0, 0, 0, 0.4);
-      padding: 3px;
-      border-radius: 8px;
-      border: 1px solid var(--color-border);
-    }
-
-    .theme-btn {
-      background: transparent;
-      border: none;
-      color: var(--color-text-muted);
-      font-size: 11px;
-      padding: 4px 8px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-family: var(--font-main);
-      font-weight: bold;
-      transition: all 0.2s ease;
-    }
-
-    .theme-btn:hover {
-      color: var(--color-text);
-      background: rgba(255, 255, 255, 0.05);
-    }
-
-    .theme-btn.active {
-      background: var(--color-primary);
-      color: #0b0f19;
-      box-shadow: 0 0 10px var(--color-primary-glow);
-    }
-
-    .icon-btn, .rules-btn, .leave-btn {
+      gap: 5px;
       background: var(--color-surface-elevated);
       border: 1px solid var(--color-border);
       color: var(--color-text);
-      padding: 6px 12px;
+      padding: 5px 10px;
+      height: 32px;
       border-radius: 6px;
       cursor: pointer;
       font-size: 12px;
-      font-weight: bold;
+      font-weight: 700;
       font-family: var(--font-main);
-      transition: all 0.2s ease;
+      transition: border-color 0.15s ease, color 0.15s ease;
     }
 
-    .rules-btn:hover, .icon-btn:hover {
+    .ctrl-btn:hover {
       border-color: var(--color-primary);
       color: var(--color-primary);
-      box-shadow: 0 0 10px var(--color-primary-glow);
     }
 
-    .leave-btn:hover {
+    .ctrl-btn:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
+
+    .ctrl-btn.danger-hover:hover {
       border-color: var(--color-danger);
       color: var(--color-danger);
-      box-shadow: 0 0 10px rgba(255, 23, 68, 0.35);
+    }
+
+    .ctrl-btn.icon-only {
+      padding: 5px 8px;
+    }
+
+    .caret {
+      font-size: 10px;
+      opacity: 0.75;
+    }
+
+    .btn-lbl {
+      display: none;
+    }
+
+    @media (min-width: 640px) {
+      .btn-lbl {
+        display: inline;
+      }
+    }
+
+    .theme-menu {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 6px);
+      min-width: 190px;
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 4px;
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.65);
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      z-index: 300;
+    }
+
+    .theme-option {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: transparent;
+      border: none;
+      color: var(--color-text);
+      font-family: var(--font-main);
+      font-size: 12px;
+      font-weight: 700;
+      padding: 8px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      text-align: left;
+      transition: background-color 0.12s ease;
+    }
+
+    .theme-option:hover {
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .theme-option.active {
+      color: var(--color-primary);
+      background: rgba(0, 240, 255, 0.1);
     }
   `]
 })
 export class HeaderComponent {
   @Output() openRules = new EventEmitter<void>();
   copyNotification = false;
+  themeMenuOpen = false;
 
   constructor(
     public themeService: ThemeService,
     public gameService: GameService,
-    public soundService: SoundService
+    public soundService: SoundService,
+    private elRef: ElementRef<HTMLElement>
   ) {}
+
+  @HostListener('document:click', ['$event'])
+  onDocumentClick(event: MouseEvent): void {
+    if (this.themeMenuOpen && !this.elRef.nativeElement.contains(event.target as Node)) {
+      this.themeMenuOpen = false;
+    }
+  }
+
+  selectTheme(id: 'cyberpunk' | 'tarot' | 'classic'): void {
+    this.themeService.setTheme(id);
+    this.themeMenuOpen = false;
+  }
 
   toggleAudio(): void {
     this.soundService.soundEnabled = !this.soundService.soundEnabled;

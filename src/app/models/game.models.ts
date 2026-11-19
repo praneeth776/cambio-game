@@ -5,24 +5,18 @@ export type CardActionType = 'NONE' | 'PEEK_OWN' | 'PEEK_OTHER' | 'SWAP';
 export interface Card {
   id: string;             // Unique card identifier (e.g. "H-7-1")
   suit: Suit;
-  rank: number;           // 1 to 13 (1=A, 11=J, 12=Q, 13=K)
-  label: string;          // 'A', '2'..'10', 'J', 'Q', 'K'
-  pointValue: number;     // A=1, 2-10=value, J=11, Q=12, Black K=13, Red K=0
+  rank: number;           // 0=Joker, 1=A, 2-10, 11=J, 12=Q, 13=K
+  label: string;          // 'A', '2'..'10', 'J', 'Q', 'K', 'JKR'
+  pointValue: number;     // Red K=-1, Joker=0, A=1, 2-10=value, J=11, Q=12, Black K=13
   action: CardActionType;
   isRed: boolean;
-}
-
-export interface PlayerCardSlot {
-  card: Card;
-  isFaceUp: boolean;      // Temporarily visible to local player during peek or end game
-  peekerIds?: string[];   // Who currently knows this card
 }
 
 export interface Player {
   id: string;
   name: string;
   avatar: string;
-  cards: Card[];          // Host/Local view has real cards; Remote peers see masked cards unless peeked
+  cards: (Card | null)[]; // Fixed spatial slots; null indicates a shed slot placeholder
   isHost: boolean;
   isBot: boolean;
   connected: boolean;
@@ -30,7 +24,7 @@ export interface Player {
   score: number;
 }
 
-export type GamePhase = 
+export type GamePhase =
   | 'LOBBY'
   | 'INITIAL_PEEK'
   | 'PLAYING'
@@ -52,6 +46,25 @@ export interface GameLogEntry {
   type: 'info' | 'action' | 'cambio' | 'snap' | 'danger' | 'warning';
 }
 
+export interface ToastNotification {
+  id: string;
+  message: string;
+  tone: 'info' | 'snap' | 'danger' | 'cambio';
+}
+
+export type AnimationEvent =
+  | { type: 'DEAL'; playerIds: string[] }
+  | { type: 'DRAW'; playerId: string; source: 'DECK' | 'DISCARD'; card?: Card }
+  | { type: 'SWAP_HAND'; playerId: string; slotIndex: number; discardedCard: Card }
+  | { type: 'DISCARD_DRAWN'; playerId: string; card: Card }
+  | { type: 'BLIND_SWAP'; p1Id: string; idx1: number; p2Id: string; idx2: number }
+  | { type: 'MATCH_DISCARD'; targetPlayerId: string; slotIndex: number; card: Card }
+  | { type: 'PENALTY_DRAW'; playerId: string; slotIndex: number }
+  | { type: 'MISMATCH_SHAKE'; targetPlayerId: string; slotIndex: number }
+  | { type: 'TRANSFER'; fromPlayerId: string; fromSlot: number; toPlayerId: string; toSlot: number }
+  | { type: 'FREEZE'; playerId: string }
+  | { type: 'SHOWDOWN' };
+
 export interface GameState {
   roomCode: string;
   phase: GamePhase;
@@ -62,8 +75,8 @@ export interface GameState {
   finalTurnsRemaining: number;
   drawPileCount: number;
   discardPile: Card[];
-  drawnCard: Card | null;  // Card currently drawn by active player
-  drawnSource: 'DECK' | 'DISCARD' | null; // Track where drawnCard came from
+  drawnCard: Card | null;
+  drawnSource: 'DECK' | 'DISCARD' | null;
   activeAction: ActiveAction | null;
   logs: GameLogEntry[];
 }

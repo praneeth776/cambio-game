@@ -1,13 +1,20 @@
 import { Injectable, signal, computed } from '@angular/core';
-import { Card, Player, GameState, GameLogEntry } from '../models/game.models';
+import {
+  Card,
+  Player,
+  GameState,
+  GameLogEntry,
+  AnimationEvent,
+  ToastNotification
+} from '../models/game.models';
 import { createDeck, shuffleDeck, getSuitSymbol } from '../utils/card.utils';
 import { SoundService } from './sound.service';
+import { CardFlightService } from './card-flight.service';
 import confetti from 'canvas-confetti';
-// Trystero import for zero-server WebRTC peer connections
-// @ts-ignore
 import { joinRoom } from 'trystero/nostr';
 
 const APP_ID = 'cambio-p2p-v1';
+const MAX_LOGS = 60;
 
 @Injectable({
   providedIn: 'root'
@@ -37,20 +44,30 @@ export class GameService {
   // Set of cards temporarily revealed for 3 seconds with an expiration timestamp
   readonly temporarilyOpenCards = signal<Record<string, number>>({});
 
-  // Local card knowledge map (used for game-over reveal / internal tracking)
+  // Local card knowledge map (used at game-over reveal)
   readonly knownCards = signal<Record<string, Card>>({});
 
-  // Temporary peek overlay (legacy fallback if needed)
-  readonly activePeek = signal<{ card: Card; ownerName: string; slotIndex: number; expiresAt: number } | null>(null);
+  // Brief floating table toast (auto-dismissed after 2s)
+  readonly activeToast = signal<ToastNotification | null>(null);
+
+  // Delays Game Over scoreboard modal until staggered Showdown card flip finishes
+  readonly showdownModalReady = signal<boolean>(false);
+
+  // Input guard during brief cross-zone flight transitions
+  readonly isAnimating = signal<boolean>(false);
 
   // Private canonical deck kept by the Room Host
   private canonicalDeck: Card[] = [];
 
+  // Tracked timers so room transitions never leak stale callbacks
+  private timers = new Set<ReturnType<typeof setTimeout>>();
+
   // Trystero P2P Room instance & message channels
   private p2pRoom: any = null;
-  private sendSyncState: any = null;
-  private sendPlayerAction: any = null;
-  private sendSyncReveal: any = null;
+  private sendSyncState: ((data: GameState) => void) | null = null;
+  private sendPlayerAction: ((data: any) => void) | null = null;
+  private sendSyncReveal: ((data: { cardId: string; durationMs: number }) => void) | null = null;
+  private sendAnimEvent: ((data: AnimationEvent) => void) | null = null;
   private peerToPlayerId = new Map<string, string>();
   private hasAnnouncedJoin = false;
 
@@ -82,10 +99,60 @@ export class GameService {
     return this.state().frozenPlayerIds.includes(this.localPlayerId());
   });
 
-  constructor(private sound: SoundService) {}
+  constructor(
+    private sound: SoundService,
+    private flightService: CardFlightService
+  ) {}
 
   isPlayerFrozen(playerId: string): boolean {
     return this.state().frozenPlayerIds.includes(playerId);
+  }
+
+  countActiveCards(cards: (Card | null)[]): number {
+    return cards.reduce((n, c) => n + (c ? 1 : 0), 0);
+  }
+
+  private scheduleTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
+    const id = setTimeout(() => {
+      this.timers.delete(id);
+      fn();
+    }, ms);
+    this.timers.add(id);
+    return id;
+  }
+
+  private clearAllTimers(): void {
+    this.timers.forEach(id => clearTimeout(id));
+    this.timers.clear();
+    this.flightService.clearAll();
+    this.isAnimating.set(false);
+  }
+
+  private clearSlot(cards: (Card | null)[], index: number): void {
+    if (index < 0 || index >= cards.length) return;
+    cards[index] = null;
+    // Preserve base 2x2 slots (indices 0..3), only trim trailing nulls beyond index 3
+    while (cards.length > 4 && cards[cards.length - 1] === null) {
+      cards.pop();
+    }
+  }
+
+  private insertCardIntoHand(cards: (Card | null)[], card: Card): number {
+    const emptyIdx = cards.findIndex(c => c === null);
+    if (emptyIdx !== -1) {
+      cards[emptyIdx] = card;
+      return emptyIdx;
+    }
+    cards.push(card);
+    return cards.length - 1;
+  }
+
+  private pickRandomActiveSlot(cards: (Card | null)[]): number {
+    const activeIndices = cards
+      .map((c, idx) => (c ? idx : -1))
+      .filter(idx => idx !== -1);
+    if (activeIndices.length === 0) return -1;
+    return activeIndices[Math.floor(Math.random() * activeIndices.length)];
   }
 
   private formatCardTag(card: Card): string {
@@ -93,11 +160,40 @@ export class GameService {
     return `${card.label}${getSuitSymbol(card.suit)}`;
   }
 
+  private appendLog(logs: GameLogEntry[], message: string, type: GameLogEntry['type']): GameLogEntry[] {
+    const next = [
+      ...logs,
+      { id: Math.random().toString(), timestamp: Date.now(), message, type }
+    ];
+    return next.length > MAX_LOGS ? next.slice(next.length - MAX_LOGS) : next;
+  }
+
+  showToast(message: string, tone: ToastNotification['tone'] = 'info', durationMs: number = 2000): void {
+    const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    this.activeToast.set({ id, message, tone });
+    this.scheduleTimer(() => {
+      if (this.activeToast()?.id === id) {
+        this.activeToast.set(null);
+      }
+    }, durationMs);
+  }
+
+  private emitAnimation(event: AnimationEvent): void {
+    this.flightService.playEvent(event, this.localPlayerId());
+    if (this.isHost()) {
+      this.sendAnimEvent?.(event);
+    }
+  }
+
   // -------------------------------------------------------------
   // LOBBY & ROOM INITIALIZATION
   // -------------------------------------------------------------
   createRoom(customCode?: string): string {
     this.cleanupP2P();
+    this.clearAllTimers();
+    this.showdownModalReady.set(false);
+    this.activeToast.set(null);
+
     const code = customCode ? customCode.toUpperCase() : Math.random().toString(36).substring(2, 6).toUpperCase();
     const host: Player = {
       id: this.localPlayerId(),
@@ -138,6 +234,10 @@ export class GameService {
 
   joinRoom(code: string, playerName?: string): void {
     this.cleanupP2P();
+    this.clearAllTimers();
+    this.showdownModalReady.set(false);
+    this.activeToast.set(null);
+
     const roomCode = code.toUpperCase().trim();
     if (!roomCode) return;
 
@@ -183,9 +283,11 @@ export class GameService {
 
   leaveRoom(): void {
     this.cleanupP2P();
+    this.clearAllTimers();
     this.temporarilyOpenCards.set({});
     this.knownCards.set({});
-    this.activePeek.set(null);
+    this.showdownModalReady.set(false);
+    this.activeToast.set(null);
     this.canonicalDeck = [];
 
     this.state.set({
@@ -282,9 +384,11 @@ export class GameService {
       this.leaveRoom();
       return;
     }
+    this.clearAllTimers();
     this.temporarilyOpenCards.set({});
     this.knownCards.set({});
-    this.activePeek.set(null);
+    this.showdownModalReady.set(false);
+    this.activeToast.set(null);
     this.canonicalDeck = [];
 
     this.state.update(s => ({
@@ -321,22 +425,20 @@ export class GameService {
       return;
     }
 
-    // Reset transient local caches
+    this.clearAllTimers();
     this.temporarilyOpenCards.set({});
     this.knownCards.set({});
-    this.activePeek.set(null);
+    this.showdownModalReady.set(false);
+    this.activeToast.set(null);
 
-    // Prepare fresh 54-card deck (52 + 2 Jokers)
     const deck = shuffleDeck(createDeck(`r_${Date.now().toString(36)}`));
 
-    // Deal 4 cards to each player
     players.forEach(p => {
       p.cards = deck.splice(0, 4);
-      p.hasPeekedInitial = p.isBot; // bots automatically memorize
+      p.hasPeekedInitial = p.isBot;
       p.score = 0;
     });
 
-    // Top card of deck starts the discard pile
     const initialDiscard = deck.pop()!;
     this.canonicalDeck = deck;
 
@@ -356,13 +458,18 @@ export class GameService {
       logs: [{
         id: Math.random().toString(),
         timestamp: Date.now(),
-        message: 'Match initialized! Memorize your bottom 2 chips (#3 & #4).',
+        message: 'Match started! Memorize your bottom 2 cards (#3 & #4).',
         type: 'info'
       }]
     }));
 
     this.sound.playActionPower();
     this.broadcastState();
+
+    // Play staggered deal animation once Arena anchors have mounted
+    this.scheduleTimer(() => {
+      this.emitAnimation({ type: 'DEAL', playerIds: players.map(p => p.id) });
+    }, 60);
   }
 
   confirmInitialPeek(): void {
@@ -386,17 +493,16 @@ export class GameService {
       this.state.update(st => ({
         ...st,
         phase: 'PLAYING',
-        logs: [...st.logs, {
-          id: Math.random().toString(),
-          timestamp: Date.now(),
-          message: `All operatives locked in! Cards closed. Turn begins with ${st.players[0].name}.`,
-          type: 'info'
-        }]
+        logs: this.appendLog(
+          st.logs,
+          `All operatives ready! Turn begins with ${st.players[0].name}.`,
+          'info'
+        )
       }));
       this.broadcastState();
 
       if (this.state().players[0].isBot) {
-        setTimeout(() => this.runBotTurn(this.state().players[0]), 1200);
+        this.scheduleTimer(() => this.runBotTurn(this.state().players[0]), 650);
       }
     }
   }
@@ -405,6 +511,7 @@ export class GameService {
   // TURN ACTIONS: DRAW (UNIFIED HOST/PEER)
   // -------------------------------------------------------------
   drawFromDeck(): void {
+    if (this.isAnimating()) return;
     if (!this.isMyTurn() || this.state().drawnCard !== null || this.state().activeAction !== null) return;
     this.sound.playCardFlip();
 
@@ -436,17 +543,14 @@ export class GameService {
       drawnCard: drawn,
       drawnSource: 'DECK',
       drawPileCount: this.canonicalDeck.length,
-      logs: [...curr.logs, {
-        id: Math.random().toString(),
-        timestamp: Date.now(),
-        message: `${player?.name || 'Operative'} drew a card from the Memory Buffer.`,
-        type: 'action'
-      }]
+      logs: this.appendLog(curr.logs, `${player?.name || 'Operative'} drew from Buffer.`, 'action')
     }));
     this.broadcastState();
+    this.emitAnimation({ type: 'DRAW', playerId, source: 'DECK', card: drawn });
   }
 
   drawFromDiscard(): void {
+    if (this.isAnimating()) return;
     if (!this.isMyTurn() || this.state().drawnCard !== null || this.state().activeAction !== null || this.state().discardPile.length === 0) return;
     this.sound.playCardFlip();
 
@@ -471,20 +575,21 @@ export class GameService {
       drawnCard: drawn,
       drawnSource: 'DISCARD',
       discardPile: discard,
-      logs: [...curr.logs, {
-        id: Math.random().toString(),
-        timestamp: Date.now(),
-        message: `${player?.name || 'Operative'} took top discard [${this.formatCardTag(drawn)}] (must swap into hand).`,
-        type: 'action'
-      }]
+      logs: this.appendLog(
+        curr.logs,
+        `${player?.name || 'Operative'} took [${this.formatCardTag(drawn)}] from Cache.`,
+        'action'
+      )
     }));
     this.broadcastState();
+    this.emitAnimation({ type: 'DRAW', playerId, source: 'DISCARD', card: drawn });
   }
 
   // -------------------------------------------------------------
   // TURN ACTIONS: REPLACE / DISCARD (UNIFIED HOST/PEER)
   // -------------------------------------------------------------
   replaceCardInHand(slotIndex: number): void {
+    if (this.isAnimating()) return;
     if (!this.isMyTurn() || !this.state().drawnCard) return;
     this.sound.playCardFlip();
 
@@ -505,6 +610,9 @@ export class GameService {
     if (!player || slotIndex < 0 || slotIndex >= player.cards.length) return;
 
     const oldCard = player.cards[slotIndex];
+    if (!oldCard) return; // Cannot swap with an empty placeholder slot
+
+    this.emitAnimation({ type: 'SWAP_HAND', playerId, slotIndex, discardedCard: oldCard });
     player.cards[slotIndex] = drawn;
 
     this.state.update(curr => ({
@@ -513,18 +621,18 @@ export class GameService {
       drawnCard: null,
       drawnSource: null,
       discardPile: [...curr.discardPile, oldCard],
-      logs: [...curr.logs, {
-        id: Math.random().toString(),
-        timestamp: Date.now(),
-        message: `${player.name} swapped chip #${slotIndex + 1} and discarded [${this.formatCardTag(oldCard)}].`,
-        type: 'action'
-      }]
+      logs: this.appendLog(
+        curr.logs,
+        `${player.name} swapped #${slotIndex + 1} → discarded [${this.formatCardTag(oldCard)}].`,
+        'action'
+      )
     }));
 
     this.finishTurn();
   }
 
   discardDrawnCard(): void {
+    if (this.isAnimating()) return;
     const s = this.state();
     if (!this.isMyTurn() || !s.drawnCard || s.drawnSource !== 'DECK') return;
     this.sound.playCardFlip();
@@ -542,17 +650,18 @@ export class GameService {
     if (!drawn || s.drawnSource !== 'DECK' || s.currentTurnPlayerId !== playerId || this.isPlayerFrozen(playerId)) return;
 
     const player = s.players.find(p => p.id === playerId);
+    this.emitAnimation({ type: 'DISCARD_DRAWN', playerId, card: drawn });
+
     this.state.update(curr => ({
       ...curr,
       drawnCard: null,
       drawnSource: null,
       discardPile: [...curr.discardPile, drawn],
-      logs: [...curr.logs, {
-        id: Math.random().toString(),
-        timestamp: Date.now(),
-        message: `${player?.name || 'Operative'} discarded drawn card [${this.formatCardTag(drawn)}].`,
-        type: 'action'
-      }]
+      logs: this.appendLog(
+        curr.logs,
+        `${player?.name || 'Operative'} discarded [${this.formatCardTag(drawn)}].`,
+        'action'
+      )
     }));
 
     if (drawn.action !== 'NONE') {
@@ -570,14 +679,13 @@ export class GameService {
     const s = this.state();
     const activePlayer = s.players.find(p => p.id === playerId);
 
-    // Check if valid targets exist (e.g. unfrozen players with >=1 card)
-    const ownHasCards = (activePlayer?.cards.length || 0) > 0;
+    const ownHasCards = activePlayer ? this.countActiveCards(activePlayer.cards) > 0 : false;
     const unfrozenOpponentsWithCards = s.players.filter(
-      p => p.id !== playerId && !this.isPlayerFrozen(p.id) && p.cards.length > 0
+      p => p.id !== playerId && !this.isPlayerFrozen(p.id) && this.countActiveCards(p.cards) > 0
     );
     const totalSwappableCards = s.players
       .filter(p => !this.isPlayerFrozen(p.id))
-      .reduce((acc, p) => acc + p.cards.length, 0);
+      .reduce((acc, p) => acc + this.countActiveCards(p.cards), 0);
 
     if (card.action === 'PEEK_OWN') {
       if (!ownHasCards) {
@@ -589,17 +697,17 @@ export class GameService {
         activeAction: {
           type: 'PEEK_OWN',
           sourcePlayerId: playerId,
-          message: 'Rank 7/8: Select 1 of your own chips to decrypt for 3s!'
+          message: 'Power 7/8: Pick 1 of your own cards to peek (3s)'
         }
       }));
       this.broadcastState();
 
       if (activePlayer?.isBot) {
-        setTimeout(() => this.runBotPeekOwn(activePlayer), 1000);
+        this.scheduleTimer(() => this.runBotPeekOwn(activePlayer), 550);
       }
     } else if (card.action === 'PEEK_OTHER') {
       if (unfrozenOpponentsWithCards.length === 0) {
-        this.resolveActionComplete(`${activePlayer?.name}: No unfrozen opponent cards to inspect.`);
+        this.resolveActionComplete(`${activePlayer?.name}: No unfrozen opponent cards to peek.`);
         return;
       }
       this.state.update(curr => ({
@@ -607,13 +715,13 @@ export class GameService {
         activeAction: {
           type: 'PEEK_OTHER',
           sourcePlayerId: playerId,
-          message: 'Rank 9/10: Select an unfrozen rival’s chip to inspect for 3s!'
+          message: 'Power 9/10: Pick a rival card to peek (3s)'
         }
       }));
       this.broadcastState();
 
       if (activePlayer?.isBot) {
-        setTimeout(() => this.runBotPeekOther(activePlayer), 1000);
+        this.scheduleTimer(() => this.runBotPeekOther(activePlayer), 550);
       }
     } else if (card.action === 'SWAP') {
       if (totalSwappableCards < 2) {
@@ -625,13 +733,13 @@ export class GameService {
         activeAction: {
           type: 'SWAP_SELECT_FIRST',
           sourcePlayerId: playerId,
-          message: 'Rank J/Q: Select the 1st unfrozen chip to swap!'
+          message: 'Power J/Q: Select 1st card to swap'
         }
       }));
       this.broadcastState();
 
       if (activePlayer?.isBot) {
-        setTimeout(() => this.runBotSwap(activePlayer), 1000);
+        this.scheduleTimer(() => this.runBotSwap(activePlayer), 550);
       }
     }
   }
@@ -647,9 +755,8 @@ export class GameService {
   temporaryRevealCard(cardId: string, durationMs: number = 3000): void {
     const exp = Date.now() + durationMs;
     this.temporarilyOpenCards.update(curr => ({ ...curr, [cardId]: exp }));
-    setTimeout(() => {
+    this.scheduleTimer(() => {
       this.temporarilyOpenCards.update(curr => {
-        // Only clear if another click hasn't extended this card's timer
         if (curr[cardId] !== exp) return curr;
         const next = { ...curr };
         delete next[cardId];
@@ -660,27 +767,25 @@ export class GameService {
 
   // -------------------------------------------------------------
   // UNIFIED CARD CLICK INTERACTION
-  // 1. In INITIAL_PEEK: no extra peeks allowed (bottom 2 are shown automatically until confirmed)
-  // 2. Frozen player hands cannot interact or be targeted
-  // 3. If drew a card: switches clicked card with drawn card & discards clicked card
-  // 4. If resolving power action: executes peek/swap/transfer
-  // 5. Otherwise: opens clicked card for 3s; if discard matches -> discards (and transfers if opponent's); if mismatch -> +1 penalty card!
   // -------------------------------------------------------------
   handleCardClick(targetPlayerId: string, slotIndex: number): void {
+    if (this.isAnimating()) return;
     const localId = this.localPlayerId();
     const state = this.state();
 
     if (state.phase !== 'PLAYING') return;
 
-    // Frozen players cannot click or interact with cards
     if (this.isPlayerFrozen(localId)) {
-      this.addLog('❄️ Your hand is FROZEN until Showdown!', 'warning');
+      this.showToast('Your hand is frozen until Showdown', 'info');
       return;
     }
 
-    // Condition 3: Holding drawn card -> swap with own card
+    const targetPlayer = state.players.find(p => p.id === targetPlayerId);
+    const clickedCard = targetPlayer?.cards[slotIndex] ?? null;
+
+    // Holding drawn card -> swap with non-empty own card
     if (state.drawnCard !== null) {
-      if (targetPlayerId === localId && this.isMyTurn()) {
+      if (targetPlayerId === localId && this.isMyTurn() && clickedCard !== null) {
         this.replaceCardInHand(slotIndex);
       }
       return;
@@ -689,7 +794,7 @@ export class GameService {
     // Resolving an active special power or card transfer
     if (state.activeAction !== null) {
       const action = state.activeAction;
-      if (action.sourcePlayerId !== localId) return;
+      if (action.sourcePlayerId !== localId || !clickedCard) return;
 
       if (action.type === 'TRANSFER_CARD_TO_OPPONENT') {
         if (targetPlayerId === localId) {
@@ -707,61 +812,48 @@ export class GameService {
         return;
       }
 
-      // Prevent targeting frozen players for peeks or swaps
       if (this.isPlayerFrozen(targetPlayerId)) {
-        this.addLog('❄️ Cannot target a FROZEN player’s cards!', 'warning');
+        this.showToast('Cannot target a frozen player', 'info');
         return;
       }
 
       if (action.type === 'PEEK_OWN') {
         if (targetPlayerId !== localId) return;
-        const me = state.players.find(p => p.id === localId);
-        const card = me?.cards[slotIndex];
-        if (card) {
-          // Open privately for 3 seconds for local player only
-          this.sound.playCardFlip();
-          this.temporaryRevealCard(card.id, 3000);
-          if (this.isHost()) {
-            this.performResolvePeek(localId, targetPlayerId, slotIndex, 'PEEK_OWN');
-          } else {
-            this.sendPlayerAction?.({
-              type: 'RESOLVE_PEEK_ACTION',
-              playerId: localId,
-              targetPlayerId,
-              slotIndex,
-              actionType: 'PEEK_OWN'
-            });
-          }
+        this.sound.playCardFlip();
+        this.temporaryRevealCard(clickedCard.id, 3000);
+        if (this.isHost()) {
+          this.performResolvePeek(localId, targetPlayerId, slotIndex, 'PEEK_OWN');
+        } else {
+          this.sendPlayerAction?.({
+            type: 'RESOLVE_PEEK_ACTION',
+            playerId: localId,
+            targetPlayerId,
+            slotIndex,
+            actionType: 'PEEK_OWN'
+          });
         }
         return;
       }
 
       if (action.type === 'PEEK_OTHER') {
         if (targetPlayerId === localId) return;
-        const targetP = state.players.find(p => p.id === targetPlayerId);
-        const card = targetP?.cards[slotIndex];
-        if (card && targetP) {
-          // Open privately for 3 seconds for local player only
-          this.sound.playCardFlip();
-          this.temporaryRevealCard(card.id, 3000);
-          if (this.isHost()) {
-            this.performResolvePeek(localId, targetPlayerId, slotIndex, 'PEEK_OTHER');
-          } else {
-            this.sendPlayerAction?.({
-              type: 'RESOLVE_PEEK_ACTION',
-              playerId: localId,
-              targetPlayerId,
-              slotIndex,
-              actionType: 'PEEK_OTHER'
-            });
-          }
+        this.sound.playCardFlip();
+        this.temporaryRevealCard(clickedCard.id, 3000);
+        if (this.isHost()) {
+          this.performResolvePeek(localId, targetPlayerId, slotIndex, 'PEEK_OTHER');
+        } else {
+          this.sendPlayerAction?.({
+            type: 'RESOLVE_PEEK_ACTION',
+            playerId: localId,
+            targetPlayerId,
+            slotIndex,
+            actionType: 'PEEK_OTHER'
+          });
         }
         return;
       }
 
       if (action.type === 'SWAP_SELECT_FIRST') {
-        const targetP = state.players.find(p => p.id === targetPlayerId);
-        if (!targetP || !targetP.cards[slotIndex]) return;
         this.state.update(s => ({
           ...s,
           activeAction: {
@@ -769,21 +861,20 @@ export class GameService {
             sourcePlayerId: action.sourcePlayerId,
             targetPlayerId,
             firstCardIndex: slotIndex,
-            message: `1st chip selected (${targetPlayerId === localId ? 'yours' : targetP.name}'s #${slotIndex + 1}). Click a different chip to swap (or click again to deselect)!`
+            message: `Select 2nd card to swap (click selected again to cancel)`
           }
         }));
         return;
       }
 
       if (action.type === 'SWAP_SELECT_SECOND') {
-        // Clicking the exact same card deselects it
         if (action.targetPlayerId === targetPlayerId && action.firstCardIndex === slotIndex) {
           this.state.update(s => ({
             ...s,
             activeAction: {
               type: 'SWAP_SELECT_FIRST',
               sourcePlayerId: action.sourcePlayerId,
-              message: 'Rank J/Q: Select the 1st unfrozen chip to swap!'
+              message: 'Power J/Q: Select 1st card to swap'
             }
           }));
           return;
@@ -794,9 +885,10 @@ export class GameService {
       return;
     }
 
-    // Condition 1 & 2: Match against discard OR penalty
+    // Card-click match / penalty check
+    if (!clickedCard) return;
     if (this.isPlayerFrozen(targetPlayerId)) {
-      this.addLog('❄️ That player’s cards are FROZEN from play!', 'warning');
+      this.showToast('That player is frozen from play', 'info');
       return;
     }
 
@@ -814,8 +906,8 @@ export class GameService {
     const target = s.players.find(p => p.id === targetPlayerId);
 
     const msg = actionType === 'PEEK_OWN'
-      ? `${actor?.name || 'Operative'} decrypted their chip #${slotIndex + 1} (3s peek).`
-      : `${actor?.name || 'Operative'} infiltrated ${target?.name || 'rival'}’s chip #${slotIndex + 1} (3s peek).`;
+      ? `${actor?.name || 'Operative'} peeked at their card #${slotIndex + 1}.`
+      : `${actor?.name || 'Operative'} peeked at ${target?.name || 'rival'}’s card #${slotIndex + 1}.`;
 
     this.resolveActionComplete(msg);
   }
@@ -837,59 +929,58 @@ export class GameService {
     const clickedCard = targetPlayer.cards[slotIndex];
     if (!clickedCard) return;
 
-    // 1. SIDE EFFECT: PEEK FUNCTION OPENS THE CARD FOR 3 SECONDS FOR EVERYONE
-    this.temporaryRevealCard(clickedCard.id, 3000);
-    this.sound.playCardFlip();
-    this.sendSyncReveal?.({ cardId: clickedCard.id, durationMs: 3000 });
-
-    // 2. CHECK MATCH AGAINST TOP DISCARD
     if (clickedCard.rank === topDiscard.rank) {
+      // MATCH! Fly card to discard, leave null placeholder at slotIndex
       this.sound.playSnap();
-      targetPlayer.cards.splice(slotIndex, 1);
+      this.emitAnimation({ type: 'MATCH_DISCARD', targetPlayerId, slotIndex, card: clickedCard });
+      this.clearSlot(targetPlayer.cards, slotIndex);
 
       if (targetPlayerId === clickerId) {
-        // Matched own card: shed card!
+        this.showToast(`Matched ${this.formatCardTag(clickedCard)}! Shed 1 card`, 'snap');
         this.state.update(curr => ({
           ...curr,
           players,
           discardPile: [...curr.discardPile, clickedCard],
-          logs: [...curr.logs, {
-            id: Math.random().toString(),
-            timestamp: Date.now(),
-            message: `⚡ MATCH! ${clicker.name} matched [${this.formatCardTag(clickedCard)}] and shed their card!`,
-            type: 'snap'
-          }]
+          logs: this.appendLog(
+            curr.logs,
+            `⚡ MATCH! ${clicker.name} shed [${this.formatCardTag(clickedCard)}] from #${slotIndex + 1}.`,
+            'snap'
+          )
         }));
         this.broadcastState();
       } else {
-        // Matched opponent's card: discard opponent's card and transfer 1 of clicker's cards to opponent
+        this.showToast(`Matched ${targetPlayer.name}'s ${this.formatCardTag(clickedCard)}! Give 1 card`, 'snap');
         this.state.update(curr => ({
           ...curr,
           players,
           discardPile: [...curr.discardPile, clickedCard],
-          logs: [...curr.logs, {
-            id: Math.random().toString(),
-            timestamp: Date.now(),
-            message: `⚡ OPPONENT MATCH! ${clicker.name} matched ${targetPlayer.name}’s [${this.formatCardTag(clickedCard)}] card!`,
-            type: 'snap'
-          }]
+          logs: this.appendLog(
+            curr.logs,
+            `⚡ OPPONENT MATCH! ${clicker.name} matched ${targetPlayer.name}’s [${this.formatCardTag(clickedCard)}]!`,
+            'snap'
+          )
         }));
 
-        if (clicker.cards.length > 0) {
-          if (clicker.cards.length === 1 || clicker.isBot) {
-            const transferred = clicker.cards.pop()!;
-            targetPlayer.cards.push(transferred);
-            this.addLog(`🔄 ${clicker.name} gave 1 card to ${targetPlayer.name} as replacement!`, 'action');
+        const clickerActiveCount = this.countActiveCards(clicker.cards);
+        if (clickerActiveCount > 0) {
+          if (clickerActiveCount === 1 || clicker.isBot) {
+            const fromSlot = this.pickRandomActiveSlot(clicker.cards);
+            if (fromSlot !== -1) {
+              const transferred = clicker.cards[fromSlot]!;
+              this.clearSlot(clicker.cards, fromSlot);
+              const toSlot = this.insertCardIntoHand(targetPlayer.cards, transferred);
+              this.emitAnimation({ type: 'TRANSFER', fromPlayerId: clicker.id, fromSlot, toPlayerId: targetPlayer.id, toSlot });
+              this.addLog(`🔄 ${clicker.name} transferred #${fromSlot + 1} to ${targetPlayer.name}.`, 'action');
+            }
             this.broadcastState();
           } else {
-            // Let any human clicker (host OR remote peer) select which card to give!
             this.state.update(curr => ({
               ...curr,
               activeAction: {
                 type: 'TRANSFER_CARD_TO_OPPONENT',
                 sourcePlayerId: clicker.id,
                 targetPlayerId: targetPlayer.id,
-                message: `${clicker.name}: Match successful! Select one of YOUR chips to hand over to ${targetPlayer.name}.`
+                message: `${clicker.name}: Pick one of YOUR cards to give ${targetPlayer.name}`
               }
             }));
             this.broadcastState();
@@ -899,34 +990,39 @@ export class GameService {
         }
       }
     } else {
-      // MISMATCH: Player gets additional penalty card from draw deck!
+      // MISMATCH! Shake + 3s peek + penalty card drawn into lowest empty slot (or #5+)
       this.sound.playActionPower();
+      this.temporaryRevealCard(clickedCard.id, 3000);
+      this.sendSyncReveal?.({ cardId: clickedCard.id, durationMs: 3000 });
+      this.emitAnimation({ type: 'MISMATCH_SHAKE', targetPlayerId, slotIndex });
+
       if (this.canonicalDeck.length === 0) {
         this.recycleDiscardPile();
       }
       const penaltyCard = this.canonicalDeck.pop();
       if (penaltyCard) {
-        clicker.cards.push(penaltyCard);
+        const penaltySlot = this.insertCardIntoHand(clicker.cards, penaltyCard);
+        this.emitAnimation({ type: 'PENALTY_DRAW', playerId: clicker.id, slotIndex: penaltySlot });
+        this.showToast(`Wrong rank (${this.formatCardTag(clickedCard)})! +1 penalty card`, 'danger');
         this.state.update(curr => ({
           ...curr,
           players,
           drawPileCount: this.canonicalDeck.length,
-          logs: [...curr.logs, {
-            id: Math.random().toString(),
-            timestamp: Date.now(),
-            message: `❌ MISMATCH PENALTY! ${clicker.name} clicked [${this.formatCardTag(clickedCard)}] (discard is [${this.formatCardTag(topDiscard)}]). Drew +1 penalty card!`,
-            type: 'danger'
-          }]
+          logs: this.appendLog(
+            curr.logs,
+            `❌ PENALTY! ${clicker.name} clicked [${this.formatCardTag(clickedCard)}] ≠ [${this.formatCardTag(topDiscard)}]. +1 card at #${penaltySlot + 1}.`,
+            'danger'
+          )
         }));
       } else {
+        this.showToast(`Wrong rank (${this.formatCardTag(clickedCard)})!`, 'danger');
         this.state.update(curr => ({
           ...curr,
-          logs: [...curr.logs, {
-            id: Math.random().toString(),
-            timestamp: Date.now(),
-            message: `❌ MISMATCH! ${clicker.name} clicked [${this.formatCardTag(clickedCard)}] (deck empty, no penalty card left).`,
-            type: 'danger'
-          }]
+          logs: this.appendLog(
+            curr.logs,
+            `❌ MISMATCH! ${clicker.name} clicked [${this.formatCardTag(clickedCard)}] (deck empty).`,
+            'danger'
+          )
         }));
       }
       this.broadcastState();
@@ -940,20 +1036,19 @@ export class GameService {
     const toP = players.find(p => p.id === toPlayerId);
     if (!fromP || !toP || cardIndex < 0 || cardIndex >= fromP.cards.length) return;
 
-    const card = fromP.cards.splice(cardIndex, 1)[0];
-    toP.cards.push(card);
+    const card = fromP.cards[cardIndex];
+    if (!card) return;
+
+    this.clearSlot(fromP.cards, cardIndex);
+    const toSlot = this.insertCardIntoHand(toP.cards, card);
+    this.emitAnimation({ type: 'TRANSFER', fromPlayerId, fromSlot: cardIndex, toPlayerId, toSlot });
 
     this.sound.playSnap();
     this.state.update(curr => ({
       ...curr,
       players,
       activeAction: null,
-      logs: [...curr.logs, {
-        id: Math.random().toString(),
-        timestamp: Date.now(),
-        message: `🔄 ${fromP.name} gave chip #${cardIndex + 1} to ${toP.name}!`,
-        type: 'action'
-      }]
+      logs: this.appendLog(curr.logs, `🔄 ${fromP.name} gave #${cardIndex + 1} to ${toP.name}.`, 'action')
     }));
     this.broadcastState();
   }
@@ -976,8 +1071,10 @@ export class GameService {
         p2.cards[idx2] = c1;
 
         this.sound.playSnap();
+        this.emitAnimation({ type: 'BLIND_SWAP', p1Id, idx1, p2Id, idx2 });
+        this.showToast(`${actor?.name || 'Operative'} swapped ${p1.name} #${idx1 + 1} ↔ ${p2.name} #${idx2 + 1}`, 'info');
         this.state.update(curr => ({ ...curr, players }));
-        this.resolveActionComplete(`${actor?.name || 'Operative'} swapped ${p1.name}’s #${idx1 + 1} with ${p2.name}’s #${idx2 + 1}!`);
+        this.resolveActionComplete(`${actor?.name || 'Operative'} swapped ${p1.name} #${idx1 + 1} ↔ ${p2.name} #${idx2 + 1}.`);
       }
     } else {
       this.sendPlayerAction?.({ type: 'EXECUTE_SWAP', p1Id, idx1, p2Id, idx2, actorId });
@@ -999,19 +1096,14 @@ export class GameService {
     const s = this.state();
     if (!s.activeAction || s.activeAction.sourcePlayerId !== playerId) return;
     const player = s.players.find(p => p.id === playerId);
-    this.resolveActionComplete(`${player?.name || 'Operative'} skipped the special card power.`);
+    this.resolveActionComplete(`${player?.name || 'Operative'} skipped card power.`);
   }
 
   private resolveActionComplete(logMsg: string): void {
     this.state.update(s => ({
       ...s,
       activeAction: null,
-      logs: [...s.logs, {
-        id: Math.random().toString(),
-        timestamp: Date.now(),
-        message: logMsg,
-        type: 'action'
-      }]
+      logs: this.appendLog(s.logs, logMsg, 'action')
     }));
     this.finishTurn();
   }
@@ -1040,17 +1132,19 @@ export class GameService {
     const remaining = s.players.length - frozen.length;
 
     this.sound.playCambioAlert();
+    this.emitAnimation({ type: 'FREEZE', playerId: callerId });
+    this.showToast(`${caller?.name || 'Operative'} called CAMBIO!`, 'cambio', 2400);
+
     this.state.update(curr => ({
       ...curr,
       cambioCallerId: callerId,
       frozenPlayerIds: frozen,
       finalTurnsRemaining: remaining,
-      logs: [...curr.logs, {
-        id: Math.random().toString(),
-        timestamp: Date.now(),
-        message: `🚨 ${caller?.name || 'Operative'} CALLED CAMBIO! Their cards are FROZEN. Remaining players get 1 final pass!`,
-        type: 'cambio'
-      }]
+      logs: this.appendLog(
+        curr.logs,
+        `🚨 ${caller?.name || 'Operative'} CALLED CAMBIO! Their hand is FROZEN.`,
+        'cambio'
+      )
     }));
 
     this.advanceAfterCambioOrTurn(false);
@@ -1069,33 +1163,30 @@ export class GameService {
     const players = s.players;
     let frozen = [...s.frozenPlayerIds];
 
-    // If Cambio is active and the current player just finished their final pass, freeze their cards!
     if (s.cambioCallerId !== null && freezeFinishedPlayerIfCambio) {
       const finishedId = s.currentTurnPlayerId;
       if (!frozen.includes(finishedId)) {
         frozen.push(finishedId);
         const finishedPlayer = players.find(p => p.id === finishedId);
+        this.emitAnimation({ type: 'FREEZE', playerId: finishedId });
         this.state.update(curr => ({
           ...curr,
           frozenPlayerIds: frozen,
           finalTurnsRemaining: Math.max(0, players.length - frozen.length),
-          logs: [...curr.logs, {
-            id: Math.random().toString(),
-            timestamp: Date.now(),
-            message: `❄️ ${finishedPlayer?.name || 'Operative'} finished their final pass. Cards FROZEN!`,
-            type: 'info'
-          }]
+          logs: this.appendLog(
+            curr.logs,
+            `❄️ ${finishedPlayer?.name || 'Operative'} finished final pass. Cards FROZEN.`,
+            'info'
+          )
         }));
       }
     }
 
-    // If all players are frozen, everyone has had their pass -> Showdown!
     if (s.cambioCallerId !== null && frozen.length >= players.length) {
       this.endGame();
       return;
     }
 
-    // Find next unfrozen player in turn order
     const currentIndex = players.findIndex(p => p.id === s.currentTurnPlayerId);
     let nextPlayer: Player | null = null;
     for (let step = 1; step <= players.length; step++) {
@@ -1121,26 +1212,29 @@ export class GameService {
     this.broadcastState();
 
     if (nextPlayer.isBot) {
-      setTimeout(() => this.runBotTurn(nextPlayer!), 1500);
+      this.scheduleTimer(() => this.runBotTurn(nextPlayer!), 550);
     }
   }
 
   private endGame(): void {
+    this.clearAllTimers();
     this.sound.playVictory();
-    confetti({ particleCount: 150, spread: 80, origin: { y: 0.6 } });
 
     const players = this.state().players.map(p => {
-      const totalScore = p.cards.reduce((sum, c) => sum + c.pointValue, 0);
+      const totalScore = p.cards.reduce((sum, c) => sum + (c ? c.pointValue : 0), 0);
       return { ...p, score: totalScore };
     });
 
     const allKnown: Record<string, Card> = {};
-    players.forEach(p => p.cards.forEach(c => allKnown[c.id] = c));
+    players.forEach(p => p.cards.forEach(c => { if (c) allKnown[c.id] = c; }));
     this.knownCards.set(allKnown);
 
     const sorted = [...players].sort((a, b) => a.score - b.score);
     const lowestScore = sorted[0]?.score ?? 0;
     const winners = sorted.filter(p => p.score === lowestScore).map(p => p.name).join(' & ');
+
+    this.showdownModalReady.set(false);
+    this.emitAnimation({ type: 'SHOWDOWN' });
 
     this.state.update(s => ({
       ...s,
@@ -1150,14 +1244,16 @@ export class GameService {
       drawnSource: null,
       activeAction: null,
       finalTurnsRemaining: 0,
-      logs: [...s.logs, {
-        id: Math.random().toString(),
-        timestamp: Date.now(),
-        message: `🏆 GAME OVER! Winner: ${winners} with ${lowestScore} points!`,
-        type: 'cambio'
-      }]
+      logs: this.appendLog(s.logs, `🏆 GAME OVER! Winner: ${winners} (${lowestScore} pts)`, 'cambio')
     }));
     this.broadcastState();
+
+    // Delay scoreboard modal so players see all cards flip face-up first
+    const revealDelay = this.flightService.prefersReducedMotion() ? 150 : 1200;
+    this.scheduleTimer(() => {
+      this.showdownModalReady.set(true);
+      confetti({ particleCount: 140, spread: 75, origin: { y: 0.6 } });
+    }, revealDelay);
   }
 
   private recycleDiscardPile(): void {
@@ -1173,18 +1269,17 @@ export class GameService {
   }
 
   // -------------------------------------------------------------
-  // SMART AI BOT SIMULATION (Null-safe & Freeze-aware)
+  // STAGED AI BOT SIMULATION (Visual draw -> pause -> resolve)
   // -------------------------------------------------------------
   private runBotTurn(bot: Player): void {
     const s = this.state();
     if (s.phase !== 'PLAYING' || s.currentTurnPlayerId !== bot.id || this.isPlayerFrozen(bot.id)) return;
 
-    // Fetch latest bot reference from state
     const currentBot = s.players.find(p => p.id === bot.id);
     if (!currentBot) return;
 
-    // If bot has 0 cards, call Cambio immediately if allowed, otherwise pass
-    if (currentBot.cards.length === 0) {
+    const botCardCount = this.countActiveCards(currentBot.cards);
+    if (botCardCount === 0) {
       if (s.cambioCallerId === null) {
         this.performCallCambio(currentBot.id);
       } else {
@@ -1193,135 +1288,85 @@ export class GameService {
       return;
     }
 
-    // Check if bot wants to call Cambio (only if nobody called it yet and bot holds low points)
-    const sampleCards = currentBot.cards.slice(-2);
+    const activeCards = currentBot.cards.filter((c): c is Card => c !== null);
+    const sampleCards = activeCards.slice(-2);
     const knownBotPoints = sampleCards.reduce((sum, c) => sum + c.pointValue, 0);
-    if (s.cambioCallerId === null && knownBotPoints <= 4 && currentBot.cards.length <= 4 && Math.random() < 0.45) {
+    if (s.cambioCallerId === null && knownBotPoints <= 4 && botCardCount <= 4 && Math.random() < 0.45) {
       this.performCallCambio(currentBot.id);
       return;
     }
 
-    // Bot decides to draw from discard or deck
+    // Stage 1: Bot draws from Discard or Deck so players see the draw flight
     const topDiscard = s.discardPile[s.discardPile.length - 1];
     if (topDiscard && topDiscard.pointValue <= 3 && Math.random() < 0.75) {
-      const discard = [...s.discardPile];
-      const taken = discard.pop()!;
-      const replaceIdx = Math.floor(Math.random() * currentBot.cards.length);
-      const players = s.players.map(p => ({ ...p, cards: [...p.cards] }));
-      const botCopy = players.find(p => p.id === currentBot.id)!;
-      const oldCard = botCopy.cards[replaceIdx];
-      botCopy.cards[replaceIdx] = taken;
-
       this.sound.playCardFlip();
-      this.state.update(curr => ({
-        ...curr,
-        players,
-        discardPile: [...discard, oldCard],
-        logs: [...curr.logs, {
-          id: Math.random().toString(),
-          timestamp: Date.now(),
-          message: `${currentBot.name} took discard [${this.formatCardTag(taken)}] and replaced chip #${replaceIdx + 1}.`,
-          type: 'action'
-        }]
-      }));
-      this.finishTurn();
+      this.performDrawDiscard(currentBot.id);
+      this.scheduleTimer(() => this.runBotResolveDrawn(currentBot.id), 550);
     } else {
-      if (this.canonicalDeck.length === 0) this.recycleDiscardPile();
-      const drawn = this.canonicalDeck.pop();
-      if (!drawn) {
-        this.finishTurn();
-        return;
-      }
-
       this.sound.playCardFlip();
-      if (drawn.pointValue <= 4) {
-        const replaceIdx = Math.floor(Math.random() * currentBot.cards.length);
-        const players = this.state().players.map(p => ({ ...p, cards: [...p.cards] }));
-        const botCopy = players.find(p => p.id === currentBot.id)!;
-        const oldCard = botCopy.cards[replaceIdx];
-        botCopy.cards[replaceIdx] = drawn;
-
-        this.state.update(curr => ({
-          ...curr,
-          players,
-          discardPile: [...curr.discardPile, oldCard],
-          drawPileCount: this.canonicalDeck.length,
-          logs: [...curr.logs, {
-            id: Math.random().toString(),
-            timestamp: Date.now(),
-            message: `${currentBot.name} drew from buffer, swapped chip #${replaceIdx + 1}, discarded [${this.formatCardTag(oldCard)}].`,
-            type: 'action'
-          }]
-        }));
-        this.finishTurn();
-      } else {
-        this.state.update(curr => ({
-          ...curr,
-          discardPile: [...curr.discardPile, drawn],
-          drawPileCount: this.canonicalDeck.length,
-          logs: [...curr.logs, {
-            id: Math.random().toString(),
-            timestamp: Date.now(),
-            message: `${currentBot.name} drew & discarded [${this.formatCardTag(drawn)}].`,
-            type: 'action'
-          }]
-        }));
-
-        if (drawn.action !== 'NONE') {
-          this.triggerCardAction(drawn, currentBot.id);
-        } else {
-          this.finishTurn();
-        }
-      }
+      this.performDrawDeck(currentBot.id);
+      this.scheduleTimer(() => this.runBotResolveDrawn(currentBot.id), 550);
     }
   }
 
+  private runBotResolveDrawn(botId: string): void {
+    const s = this.state();
+    if (s.phase !== 'PLAYING' || s.currentTurnPlayerId !== botId || !s.drawnCard) return;
+    const bot = s.players.find(p => p.id === botId);
+    if (!bot) return;
+
+    const drawn = s.drawnCard;
+    if (s.drawnSource === 'DISCARD' || drawn.pointValue <= 4) {
+      const replaceIdx = this.pickRandomActiveSlot(bot.cards);
+      if (replaceIdx !== -1) {
+        this.sound.playCardFlip();
+        this.performReplaceHand(bot.id, replaceIdx);
+        return;
+      }
+    }
+
+    this.sound.playCardFlip();
+    this.performDiscardDrawn(bot.id);
+  }
+
   private runBotPeekOwn(bot: Player): void {
-    this.resolveActionComplete(`${bot.name} analyzed one of its encrypted chips.`);
+    this.resolveActionComplete(`${bot.name} peeked at one of its own cards.`);
   }
 
   private runBotPeekOther(bot: Player): void {
     const opponents = this.state().players.filter(
-      p => p.id !== bot.id && !this.isPlayerFrozen(p.id) && p.cards.length > 0
+      p => p.id !== bot.id && !this.isPlayerFrozen(p.id) && this.countActiveCards(p.cards) > 0
     );
     if (opponents.length === 0) {
       this.resolveActionComplete(`${bot.name} skipped peek.`);
       return;
     }
     const target = opponents[Math.floor(Math.random() * opponents.length)];
-    this.resolveActionComplete(`${bot.name} scanned an encrypted chip from ${target.name}.`);
+    this.resolveActionComplete(`${bot.name} peeked at ${target.name}’s hand.`);
   }
 
   private runBotSwap(bot: Player): void {
     const s = this.state();
     const currentBot = s.players.find(p => p.id === bot.id);
     const opponents = s.players.filter(
-      p => p.id !== bot.id && !this.isPlayerFrozen(p.id) && p.cards.length > 0
+      p => p.id !== bot.id && !this.isPlayerFrozen(p.id) && this.countActiveCards(p.cards) > 0
     );
 
-    if (currentBot && currentBot.cards.length > 0 && opponents.length > 0) {
+    if (currentBot && opponents.length > 0) {
+      const botIdx = this.pickRandomActiveSlot(currentBot.cards);
       const target = opponents[Math.floor(Math.random() * opponents.length)];
-      const botCardIdx = Math.floor(Math.random() * currentBot.cards.length);
-      const targetCardIdx = Math.floor(Math.random() * target.cards.length);
+      const targetIdx = this.pickRandomActiveSlot(target.cards);
 
-      const players = s.players.map(p => ({ ...p, cards: [...p.cards] }));
-      const bCopy = players.find(p => p.id === currentBot.id)!;
-      const tCopy = players.find(p => p.id === target.id)!;
-
-      const c1 = bCopy.cards[botCardIdx];
-      bCopy.cards[botCardIdx] = tCopy.cards[targetCardIdx];
-      tCopy.cards[targetCardIdx] = c1;
-
-      this.sound.playSnap();
-      this.state.update(curr => ({ ...curr, players }));
-      this.resolveActionComplete(`${currentBot.name} executed a neural spoof swap with ${target.name}!`);
-    } else {
-      this.resolveActionComplete(`${bot.name} skipped swap.`);
+      if (botIdx !== -1 && targetIdx !== -1) {
+        this.executeSwap(currentBot.id, botIdx, target.id, targetIdx, currentBot.id);
+        return;
+      }
     }
+    this.resolveActionComplete(`${bot.name} skipped swap.`);
   }
 
   // -------------------------------------------------------------
-  // NETWORKING: TRYSTERO WEBRTC P2P
+  // NETWORKING: TRYSTERO WEBRTC P2P (v0.26.0 API)
   // -------------------------------------------------------------
   private cleanupP2P(): void {
     try {
@@ -1331,6 +1376,7 @@ export class GameService {
     this.sendSyncState = null;
     this.sendPlayerAction = null;
     this.sendSyncReveal = null;
+    this.sendAnimEvent = null;
     this.peerToPlayerId.clear();
     this.hasAnnouncedJoin = false;
   }
@@ -1343,22 +1389,35 @@ export class GameService {
       const syncAction = room.makeAction<any>('SYNC_STATE');
       const playerAction = room.makeAction<any>('PLAYER_ACTION');
       const revealAction = room.makeAction<any>('SYNC_REVEAL');
+      const animAction = room.makeAction<any>('ANIM_EVENT');
 
       this.sendSyncState = (data: GameState) => syncAction.send(data).catch(() => {});
       this.sendPlayerAction = (data: any) => playerAction.send(data).catch(() => {});
       this.sendSyncReveal = (data: { cardId: string; durationMs: number }) =>
         revealAction.send(data).catch(() => {});
+      this.sendAnimEvent = (data: AnimationEvent) =>
+        animAction.send(data).catch(() => {});
 
       revealAction.onMessage = (data: { cardId: string; durationMs: number }) => {
         this.sound.playCardFlip();
         this.temporaryRevealCard(data.cardId, data.durationMs);
       };
 
-      room.onPeerJoin = (peerId: string) => {
+      animAction.onMessage = (event: AnimationEvent) => {
+        if (!this.isHost()) {
+          this.flightService.playEvent(event, this.localPlayerId());
+          if (event.type === 'SHOWDOWN') {
+            this.showdownModalReady.set(false);
+            const delay = this.flightService.prefersReducedMotion() ? 150 : 1200;
+            this.scheduleTimer(() => this.showdownModalReady.set(true), delay);
+          }
+        }
+      };
+
+      room.onPeerJoin = () => {
         if (asHost) {
           this.broadcastState();
         } else {
-          // Non-host announces its join as soon as a peer (the host) is discovered
           this.sendPlayerAction?.({
             type: 'JOIN',
             playerId: this.localPlayerId(),
@@ -1387,8 +1446,15 @@ export class GameService {
 
       syncAction.onMessage = (remoteState: GameState) => {
         if (!this.isHost()) {
+          const prevPhase = this.state().phase;
           this.state.set(remoteState);
-          // Ensure host registered us in the player list
+          if (prevPhase !== 'GAME_OVER' && remoteState.phase === 'GAME_OVER') {
+            const delay = this.flightService.prefersReducedMotion() ? 150 : 1200;
+            this.scheduleTimer(() => this.showdownModalReady.set(true), delay);
+          } else if (remoteState.phase !== 'GAME_OVER') {
+            this.showdownModalReady.set(false);
+          }
+
           const amInRoster = remoteState.players.some(p => p.id === this.localPlayerId());
           if (!amInRoster && remoteState.phase === 'LOBBY' && !this.hasAnnouncedJoin) {
             this.sendPlayerAction?.({
@@ -1448,12 +1514,7 @@ export class GameService {
           this.state.update(s => ({
             ...s,
             players: [...s.players, newPlayer],
-            logs: [...s.logs, {
-              id: Math.random().toString(),
-              timestamp: Date.now(),
-              message: `${newPlayer.name} connected to the lobby.`,
-              type: 'info'
-            }]
+            logs: this.appendLog(s.logs, `${newPlayer.name} connected to the lobby.`, 'info')
           }));
           this.broadcastState();
         }
@@ -1522,10 +1583,7 @@ export class GameService {
   private addLog(message: string, type: GameLogEntry['type'] = 'info'): void {
     this.state.update(s => ({
       ...s,
-      logs: [
-        ...s.logs,
-        { id: Math.random().toString(), timestamp: Date.now(), message, type }
-      ]
+      logs: this.appendLog(s.logs, message, type)
     }));
   }
 }

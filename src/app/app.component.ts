@@ -4,6 +4,7 @@ import { HeaderComponent } from './components/header/header.component';
 import { LobbyComponent } from './components/lobby/lobby.component';
 import { ArenaComponent } from './components/arena/arena.component';
 import { RulesModalComponent } from './components/rules-modal/rules-modal.component';
+import { CardFlightLayerComponent } from './components/card-flight-layer/card-flight-layer.component';
 import { GameService } from './services/game.service';
 import { ThemeService } from './services/theme.service';
 
@@ -15,7 +16,8 @@ import { ThemeService } from './services/theme.service';
     HeaderComponent,
     LobbyComponent,
     ArenaComponent,
-    RulesModalComponent
+    RulesModalComponent,
+    CardFlightLayerComponent
   ],
   templateUrl: './app.component.html',
   styleUrl: './app.component.css'

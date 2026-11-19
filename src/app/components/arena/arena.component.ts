@@ -1,6 +1,7 @@
 import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { CardComponent } from '../card/card.component';
+import { CardAnchorDirective } from '../../directives/card-anchor.directive';
 import { GameService } from '../../services/game.service';
 import { ThemeService } from '../../services/theme.service';
 import { Card, Player, GameLogEntry } from '../../models/game.models';
@@ -8,288 +9,261 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
 @Component({
   selector: 'app-arena',
   standalone: true,
-  imports: [CommonModule, CardComponent],
+  imports: [CommonModule, CardComponent, CardAnchorDirective],
   template: `
-    <div class="arena-layout">
-      
-      <!-- ============================================================== -->
-      <!-- MAIN ARENA TABLE AREA (LEFT & CENTER)                         -->
-      <!-- ============================================================== -->
-      <div class="arena-main">
-        
-        <!-- CAMBIO INITIATED ALERT BANNER -->
-        <div class="cambio-banner" *ngIf="gameService.state().cambioCallerId !== null">
-          <span class="siren">🚨</span>
-          <div class="banner-text">
-            <strong>{{ themeService.currentTheme().labels.cambioWarning }}</strong>
-            <span>FINAL PASSES REMAINING: {{ gameService.state().finalTurnsRemaining }}</span>
-          </div>
-          <span class="siren">🚨</span>
+    <div class="arena-viewport">
+
+      <!-- ============================================================ -->
+      <!-- 1. UNIFIED TOP STATUS PILL + FLOATING 2s ACTION TOAST        -->
+      <!-- ============================================================ -->
+      <div class="status-bar-zone">
+        <div
+          class="unified-status-pill"
+          [class.cambio-active]="gameService.state().cambioCallerId !== null"
+          [class.your-turn]="gameService.isMyTurn()"
+          [class.frozen-pill]="gameService.isLocalFrozen()">
+
+          <span class="status-dot" [class.active]="gameService.isMyTurn()"></span>
+
+          <span class="status-text">{{ unifiedStatusText }}</span>
+
+          <!-- Cambio countdown chip inside the single pill -->
+          <span class="cambio-chip" *ngIf="gameService.state().cambioCallerId !== null">
+            CAMBIO • {{ gameService.state().finalTurnsRemaining }} left
+          </span>
+
+          <!-- Contextual inline action button inside the single pill -->
+          <button
+            *ngIf="showInitialConfirmBtn"
+            class="pill-action-btn primary"
+            (click)="gameService.confirmInitialPeek()">
+            Ready — Close Cards
+          </button>
+
+          <button
+            *ngIf="showSkipPowerBtn"
+            class="pill-action-btn"
+            (click)="gameService.skipAction()">
+            Skip
+          </button>
         </div>
 
-        <!-- ACTIVE ACTION DIRECTIVE PROMPT -->
-        <div class="directive-banner" *ngIf="gameService.state().activeAction as action">
-          <div class="directive-content">
-            <span class="directive-icon">⚡</span>
-            <span class="directive-text">{{ action.message }}</span>
-            <button 
-              *ngIf="action.sourcePlayerId === gameService.localPlayerId() && action.type !== 'TRANSFER_CARD_TO_OPPONENT'" 
-              class="skip-btn" 
-              (click)="gameService.skipAction()">
-              SKIP POWER
-            </button>
-          </div>
+        <!-- 2s Floating Toast (auto-dismisses) -->
+        <div
+          class="floating-toast"
+          *ngIf="gameService.activeToast() as toast"
+          [class]="'tone-' + toast.tone"
+          role="status">
+          {{ toast.message }}
         </div>
-
-        <!-- 1. OPPONENTS CARDS SECTION (UP TO 7 OPPONENTS) -->
-        <div class="opponents-wrapper">
-          <div 
-            class="opponent-mat" 
-            *ngFor="let opp of gameService.otherPlayers()"
-            [class.active-turn]="opp.id === gameService.state().currentTurnPlayerId && !gameService.isPlayerFrozen(opp.id)"
-            [class.frozen-mat]="gameService.isPlayerFrozen(opp.id)"
-            [class.disconnected]="!opp.connected">
-            
-            <div class="opponent-hud">
-              <span class="opp-avatar">{{ opp.isBot ? '🤖' : '👤' }}</span>
-              <span class="opp-name">{{ opp.name }}</span>
-              <span class="opp-cards-badge">({{ opp.cards.length }})</span>
-              <span class="frozen-badge" *ngIf="gameService.isPlayerFrozen(opp.id)">❄️ FROZEN</span>
-              <span class="turn-indicator" *ngIf="opp.id === gameService.state().currentTurnPlayerId && !gameService.isPlayerFrozen(opp.id) && gameService.state().phase === 'PLAYING'">TURN</span>
-              <span class="offline-badge" *ngIf="!opp.connected">OFFLINE</span>
-            </div>
-
-            <!-- Opponent Cards (CLOSED face-down during active game; click to match or resolve action) -->
-            <div class="opponent-cards-grid" [class.many-cards]="opp.cards.length > 4">
-              <div 
-                *ngFor="let c of opp.cards; let idx = index" 
-                class="opp-card-slot"
-                (click)="onCardClicked(opp.id, idx)">
-                <app-card 
-                  [card]="c" 
-                  [isFaceUp]="isCardFaceUp(opp.id, idx, c)"
-                  [isTemporarilyOpen]="gameService.isCardTemporarilyOpen(c.id)"
-                  [isSelectable]="isCardSelectable(opp.id, idx)"
-                  [isSelected]="isCardSelected(opp.id, idx)"
-                  [isFrozen]="gameService.isPlayerFrozen(opp.id)"
-                  [slotIndex]="idx">
-                </app-card>
-              </div>
-              <div class="no-cards-badge" *ngIf="opp.cards.length === 0">
-                0 CHIPS LEFT
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 2. CENTER TABLE: DRAW DECK, DISCARD PILE & DRAWN CARD HUD -->
-        <div class="center-table">
-          <div class="piles-wrapper">
-            
-            <!-- DRAW PILE -->
-            <div class="pile-container draw-pile" (click)="onDrawDeckClicked()">
-              <div class="pile-label">{{ themeService.currentTheme().labels.drawPile }}</div>
-              <div class="deck-stack" [class.can-draw]="canDrawFromDeck">
-                <div class="deck-card-layer layer-3"></div>
-                <div class="deck-card-layer layer-2"></div>
-                <div class="deck-card-layer layer-1">
-                  <app-card [isFaceUp]="false" [isSelectable]="canDrawFromDeck" [disabled]="!canDrawFromDeck"></app-card>
-                </div>
-              </div>
-              <div class="pile-count">{{ gameService.state().drawPileCount }} left</div>
-            </div>
-
-            <!-- DISCARD PILE -->
-            <div class="pile-container discard-pile" (click)="onDrawDiscardClicked()">
-              <div class="pile-label">{{ themeService.currentTheme().labels.discardPile }}</div>
-              <div class="discard-stack" [class.can-draw]="canDrawFromDiscard">
-                <app-card 
-                  *ngIf="topDiscardCard" 
-                  [card]="topDiscardCard" 
-                  [isFaceUp]="true" 
-                  [isSelectable]="canDrawFromDiscard"
-                  [disabled]="!canDrawFromDiscard">
-                </app-card>
-                <div class="empty-discard" *ngIf="!topDiscardCard">
-                  <span>EMPTY CACHE</span>
-                </div>
-              </div>
-              <div class="pile-count">{{ gameService.state().discardPile.length }} chips</div>
-            </div>
-
-          </div>
-
-          <!-- DRAWN CARD ACTION HUD (ONLY SHOWN TO ACTIVE PLAYER) -->
-          <div class="drawn-hud" *ngIf="gameService.isMyTurn() && gameService.state().drawnCard as drawn">
-            <div class="drawn-header">
-              <span class="drawn-tag">
-                {{ gameService.state().drawnSource === 'DISCARD' ? 'TAKEN FROM BURN CACHE:' : 'DRAWN FROM BUFFER:' }}
-              </span>
-              <h3>{{ formatCardTitle(drawn) }}</h3>
-            </div>
-            
-            <div class="drawn-preview">
-              <app-card [card]="drawn" [isFaceUp]="true"></app-card>
-            </div>
-
-            <div class="drawn-actions">
-              <button 
-                *ngIf="gameService.state().drawnSource === 'DECK'" 
-                class="drawn-btn discard" 
-                (click)="gameService.discardDrawnCard()">
-                🗑️ DISCARD DRAWN CARD
-                <small *ngIf="drawn.action !== 'NONE'">Activates {{ formatActionName(drawn.action) }} power!</small>
-              </button>
-              <p class="swap-hint" *ngIf="gameService.state().drawnSource === 'DECK'">
-                OR: Click one of your face-down chips below to swap & discard the old one!
-              </p>
-              <p class="swap-hint mandatory" *ngIf="gameService.state().drawnSource === 'DISCARD'">
-                ⚠️ Click one of your chips below to swap it into your hand!
-              </p>
-            </div>
-          </div>
-
-          <!-- OPPONENT HOLDING DRAWN CARD NOTICE (NO CARD LEAK) -->
-          <div class="opponent-thinking-pill" *ngIf="!gameService.isMyTurn() && gameService.state().drawnCard !== null">
-            ⏳ {{ currentTurnPlayerName }} drew a card and is choosing a move...
-          </div>
-
-        </div>
-
-        <!-- 3. LOCAL PLAYER HAND (BOTTOM PROMINENT AREA) -->
-        <div 
-          class="local-player-area" 
-          *ngIf="gameService.localPlayer() as me" 
-          [class.my-turn]="gameService.isMyTurn()"
-          [class.frozen-mat]="gameService.isLocalFrozen()">
-          
-          <div class="local-hud">
-            <div class="hud-left">
-              <span class="my-avatar">{{ gameService.isLocalFrozen() ? '❄️' : '👑' }}</span>
-              <div>
-                <span class="my-name">{{ me.name }} (YOU) • {{ me.cards.length }} cards</span>
-                <span class="my-status frozen" *ngIf="gameService.isLocalFrozen()">
-                  ❄️ HAND FROZEN — WAITING FOR SHOWDOWN
-                </span>
-                <span class="my-status" *ngIf="!gameService.isLocalFrozen() && gameService.isMyTurn()">
-                  🟢 {{ turnHintText }}
-                </span>
-                <span class="my-status waiting" *ngIf="!gameService.isLocalFrozen() && !gameService.isMyTurn() && gameService.state().phase === 'PLAYING'">
-                  ⏳ {{ currentTurnPlayerName }}'s turn (click any closed card to match discard!)
-                </span>
-                <span class="my-status waiting" *ngIf="gameService.state().phase === 'INITIAL_PEEK'">
-                  👁️ MEMORIZE YOUR BOTTOM TWO CARDS
-                </span>
-              </div>
-            </div>
-
-            <div class="hud-right">
-              <!-- CALL CAMBIO BUTTON -->
-              <button 
-                class="cambio-action-btn"
-                [disabled]="!canCallCambio"
-                (click)="gameService.callCambio()">
-                ⚠️ {{ themeService.currentTheme().labels.cambioButton }}
-              </button>
-            </div>
-          </div>
-
-          <!-- CARDS GRID: CLOSED FACE DOWN DURING PLAYING; CLICK TO MATCH OR REPLACE! -->
-          <div class="my-cards-grid" [class.many-cards]="me.cards.length > 4">
-            <div 
-              class="my-card-slot" 
-              *ngFor="let card of me.cards; let idx = index" 
-              (click)="onCardClicked(me.id, idx)">
-              
-              <app-card 
-                [card]="card" 
-                [isFaceUp]="isCardFaceUp(me.id, idx, card)"
-                [isTemporarilyOpen]="gameService.isCardTemporarilyOpen(card.id)"
-                [isSelectable]="isCardSelectable(me.id, idx)"
-                [isSelected]="isCardSelected(me.id, idx)"
-                [isPeeked]="isCardCurrentlyPeeked(card)"
-                [isFrozen]="gameService.isLocalFrozen()"
-                [slotIndex]="idx">
-              </app-card>
-            </div>
-
-            <div class="no-cards-badge self" *ngIf="me.cards.length === 0">
-              🎉 0 CARDS LEFT (0 PTS!)
-            </div>
-          </div>
-
-          <!-- INITIAL PEEK CONFIRMATION BAR -->
-          <div class="initial-peek-bar" *ngIf="gameService.state().phase === 'INITIAL_PEEK' && !me.hasPeekedInitial">
-            <p class="peek-instruction">
-              👁️ {{ themeService.currentTheme().labels.initialPeekPrompt }} (bottom row #3 & #4 are revealed).
-            </p>
-            <p class="peek-memory-warning">
-              ⚠️ Once you proceed, <strong>ALL CARDS CLOSE</strong>! Keep them in memory.
-            </p>
-            <button class="confirm-peek-btn" (click)="gameService.confirmInitialPeek()">
-              I'VE MEMORIZED MY CHIPS (CLOSE & START)
-            </button>
-          </div>
-
-          <!-- WAITING FOR OTHER PLAYERS AFTER INITIAL PEEK -->
-          <div class="initial-peek-bar waiting" *ngIf="gameService.state().phase === 'INITIAL_PEEK' && me.hasPeekedInitial">
-            <p class="peek-instruction">
-              ✓ Chips memorized & locked! Waiting for remaining operatives to confirm...
-            </p>
-          </div>
-
-        </div>
-
       </div>
 
-      <!-- ============================================================== -->
-      <!-- RIGHT SIDEBAR: REAL-TIME UPDATES & ACTION FEED                -->
-      <!-- ============================================================== -->
-      <aside class="updates-sidebar">
-        <div class="sidebar-header">
-          <div class="sidebar-title">
-            <span class="live-pulse-dot"></span>
-            <span>LIVE UPDATES</span>
+      <!-- ============================================================ -->
+      <!-- 2. PERIMETER OPPONENTS ARC (FITS UP TO 7 RIVALS IN 1 SCREEN) -->
+      <!-- ============================================================ -->
+      <div
+        class="opponents-perimeter"
+        [class.dense]="gameService.otherPlayers().length >= 4">
+        <div
+          class="opponent-seat"
+          *ngFor="let opp of gameService.otherPlayers(); trackBy: trackPlayer"
+          [appCardAnchor]="'seat:' + opp.id"
+          [class.active-turn]="opp.id === gameService.state().currentTurnPlayerId && !gameService.isPlayerFrozen(opp.id) && gameService.state().phase === 'PLAYING'"
+          [class.frozen-seat]="gameService.isPlayerFrozen(opp.id)"
+          [class.disconnected]="!opp.connected">
+
+          <div class="seat-header">
+            <span class="seat-avatar">{{ opp.isBot ? '🤖' : '👤' }}</span>
+            <span class="seat-name" [title]="opp.name">{{ opp.name }}</span>
+            <span class="seat-count">{{ gameService.countActiveCards(opp.cards) }}</span>
+            <span class="seat-badge frozen" *ngIf="gameService.isPlayerFrozen(opp.id)" title="Frozen">❄️</span>
+            <span class="seat-badge offline" *ngIf="!opp.connected">OFF</span>
           </div>
-          <span class="event-badge">{{ gameService.state().logs.length }}</span>
+
+          <div class="seat-cards-grid" [class.expanded]="opp.cards.length > 4">
+            <div
+              *ngFor="let c of opp.cards; let idx = index; trackBy: trackSlot"
+              [appCardAnchor]="'slot:' + opp.id + ':' + idx"
+              class="seat-slot">
+              <app-card
+                [card]="c"
+                [compact]="true"
+                [isEmptySlot]="c === null"
+                [isFaceUp]="c !== null && isCardFaceUp(opp.id, idx, c)"
+                [isTemporarilyOpen]="c !== null && gameService.isCardTemporarilyOpen(c.id)"
+                [isSelectable]="c !== null && isCardSelectable(opp.id, idx)"
+                [isSelected]="isCardSelected(opp.id, idx)"
+                [isFrozen]="gameService.isPlayerFrozen(opp.id)"
+                [slotIndex]="idx"
+                (cardClicked)="onCardClicked(opp.id, idx)">
+              </app-card>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- 3. CENTER TABLE: BUFFER (DECK) + CACHE (DISCARD) + FLOATING  -->
+      <!-- ============================================================ -->
+      <div class="center-stage">
+        <div class="piles-row">
+          <!-- DRAW PILE (MEMORY BUFFER) -->
+          <div class="pile-slot">
+            <span class="pile-title">{{ themeService.currentTheme().labels.drawPile }}</span>
+            <div
+              class="pile-anchor"
+              [appCardAnchor]="'deck'"
+              [class.can-interact]="canDrawFromDeck"
+              (click)="onDrawDeckClicked()">
+              <div class="deck-layer layer-b"></div>
+              <div class="deck-layer layer-a"></div>
+              <app-card
+                class="deck-top-card"
+                [isFaceUp]="false"
+                [isSelectable]="canDrawFromDeck"
+                [disabled]="!canDrawFromDeck">
+              </app-card>
+            </div>
+            <span class="pile-meta">{{ gameService.state().drawPileCount }} left</span>
+          </div>
+
+          <!-- DISCARD PILE (BURN CACHE) -->
+          <div class="pile-slot">
+            <span class="pile-title">{{ themeService.currentTheme().labels.discardPile }}</span>
+            <div
+              class="pile-anchor"
+              [appCardAnchor]="'discard'"
+              [class.can-interact]="canClickDiscardPile"
+              [class.discard-target]="canDiscardHeldCard"
+              (click)="onDiscardPileClicked()">
+              <app-card
+                *ngIf="topDiscardCard as topCard"
+                [card]="topCard"
+                [isFaceUp]="true"
+                [isSelectable]="canClickDiscardPile"
+                [disabled]="!canClickDiscardPile">
+              </app-card>
+              <div class="empty-cache-box" *ngIf="!topDiscardCard">EMPTY</div>
+            </div>
+            <span class="pile-meta" *ngIf="!canDiscardHeldCard">
+              {{ topDiscardHint }}
+            </span>
+            <span class="pile-meta discard-cta" *ngIf="canDiscardHeldCard">
+              Click to Discard
+            </span>
+          </div>
+
+          <!-- FLOATING ELEVATED DRAWN CARD (NO BULKY MODAL) -->
+          <div
+            class="pile-slot drawn-float-slot"
+            [class.hidden-placeholder]="gameService.state().drawnCard === null">
+            <span class="pile-title" *ngIf="gameService.state().drawnCard">
+              {{ gameService.isMyTurn() ? 'HOLDING' : currentTurnPlayerName }}
+            </span>
+            <div class="drawn-anchor" [appCardAnchor]="'drawn-float'">
+              <app-card
+                *ngIf="gameService.state().drawnCard as drawn"
+                [card]="gameService.isMyTurn() ? drawn : null"
+                [isFaceUp]="gameService.isMyTurn()"
+                [disabled]="true">
+              </app-card>
+            </div>
+            <span class="pile-meta drawn-hint" *ngIf="gameService.isMyTurn() && gameService.state().drawnCard as drawn">
+              {{ getDrawnCardCue(drawn) }}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- 4. LOCAL PLAYER HAND (ANCHORED BOTTOM)                       -->
+      <!-- ============================================================ -->
+      <div
+        class="local-mat"
+        *ngIf="gameService.localPlayer() as me"
+        [appCardAnchor]="'seat:' + me.id"
+        [class.my-turn]="gameService.isMyTurn()"
+        [class.frozen-mat]="gameService.isLocalFrozen()">
+
+        <div class="local-mat-header">
+          <div class="local-identity">
+            <span class="local-name">{{ me.name }}</span>
+            <span class="local-count">{{ gameService.countActiveCards(me.cards) }} cards</span>
+            <span class="seat-badge frozen" *ngIf="gameService.isLocalFrozen()">❄️ FROZEN</span>
+          </div>
+
+          <button
+            class="cambio-btn"
+            [disabled]="!canCallCambio"
+            (click)="gameService.callCambio()">
+            {{ themeService.currentTheme().labels.cambioButton }}
+          </button>
         </div>
 
-        <div class="updates-feed">
-          <div 
-            class="update-item" 
-            *ngFor="let log of reversedLogs()" 
-            [class]="'log-' + log.type">
-            
-            <div class="update-meta">
-              <span class="log-badge">{{ getLogBadge(log.type) }}</span>
-              <span class="update-time">{{ log.timestamp | date:'HH:mm:ss' }}</span>
-            </div>
-
-            <div class="update-message">
-              {{ log.message }}
-            </div>
+        <div class="local-cards-grid" [class.expanded]="me.cards.length > 4">
+          <div
+            *ngFor="let card of me.cards; let idx = index; trackBy: trackSlot"
+            [appCardAnchor]="'slot:' + me.id + ':' + idx"
+            class="local-slot">
+            <app-card
+              [card]="card"
+              [isEmptySlot]="card === null"
+              [isFaceUp]="card !== null && isCardFaceUp(me.id, idx, card)"
+              [isTemporarilyOpen]="card !== null && gameService.isCardTemporarilyOpen(card.id)"
+              [isSelectable]="card !== null && isCardSelectable(me.id, idx)"
+              [isSelected]="isCardSelected(me.id, idx)"
+              [isFrozen]="gameService.isLocalFrozen()"
+              [slotIndex]="idx"
+              (cardClicked)="onCardClicked(me.id, idx)">
+            </app-card>
           </div>
+        </div>
+      </div>
 
-          <div class="empty-feed" *ngIf="gameService.state().logs.length === 0">
-            <span>Waiting for match actions...</span>
+      <!-- ============================================================ -->
+      <!-- 5. COLLAPSIBLE LOG DRAWER TOGGLE & SLIDE-OVER PANEL          -->
+      <!-- ============================================================ -->
+      <button
+        class="log-drawer-toggle"
+        (click)="logDrawerOpen = !logDrawerOpen"
+        [attr.aria-expanded]="logDrawerOpen">
+        📜 Log ({{ gameService.state().logs.length }})
+      </button>
+
+      <aside class="log-drawer" *ngIf="logDrawerOpen" role="complementary" aria-label="Match activity log">
+        <div class="drawer-header">
+          <span>MATCH LOG</span>
+          <button class="drawer-close" (click)="logDrawerOpen = false" aria-label="Close log">✕</button>
+        </div>
+        <div class="drawer-feed">
+          <div
+            class="log-row"
+            *ngFor="let log of reversedLogs()"
+            [class]="'log-' + log.type">
+            <span class="log-time">{{ log.timestamp | date:'HH:mm:ss' }}</span>
+            <span class="log-msg">{{ log.message }}</span>
           </div>
         </div>
       </aside>
 
-      <!-- GAME OVER SUMMARY MODAL -->
-      <div class="game-over-modal" *ngIf="gameService.state().phase === 'GAME_OVER'">
+      <!-- ============================================================ -->
+      <!-- 6. DELAYED GAME OVER MODAL (AFTER 1.2s SHOWDOWN FLIP)        -->
+      <!-- ============================================================ -->
+      <div
+        class="game-over-modal"
+        *ngIf="gameService.state().phase === 'GAME_OVER' && gameService.showdownModalReady()">
         <div class="game-over-content">
           <h2 class="victory-title">🏆 {{ themeService.currentTheme().labels.victoryTitle }}</h2>
-          <p class="victory-subtitle">All cards decrypted! Lowest total score wins:</p>
+          <p class="victory-subtitle">Final Showdown Scores (lowest wins)</p>
 
           <div class="scores-table">
-            <div 
-              class="score-row" 
+            <div
+              class="score-row"
               *ngFor="let p of sortedPlayers(); let rank = index"
               [class.winner]="p.score === lowestScore()">
               <span class="rank-pos">#{{ rank + 1 }}</span>
               <span class="p-name">{{ p.name }} {{ p.id === gameService.localPlayerId() ? '(YOU)' : '' }}</span>
-              <span class="card-count">{{ p.cards.length }} cards</span>
+              <span class="card-count">{{ gameService.countActiveCards(p.cards) }} cards</span>
               <span class="p-pts">{{ p.score }} PTS</span>
             </div>
           </div>
@@ -308,775 +282,590 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
     </div>
   `,
   styles: [`
-    .arena-layout {
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
-      padding: 16px;
-      min-height: calc(100vh - 80px);
-      background: var(--color-bg-gradient);
-      box-sizing: border-box;
-      max-width: 1440px;
-      margin: 0 auto;
-      width: 100%;
-    }
-
-    @media (min-width: 1024px) {
-      .arena-layout {
-        flex-direction: row;
-        align-items: flex-start;
-      }
-    }
-
-    .arena-main {
-      flex: 1;
+    .arena-viewport {
+      position: relative;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 20px;
-      min-width: 0;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 14px 14px;
+      min-height: calc(100vh - var(--header-height, 56px));
+      background: var(--color-bg-gradient);
+      box-sizing: border-box;
       width: 100%;
-    }
-
-    /* RIGHT UPDATES SIDEBAR */
-    .updates-sidebar {
-      width: 100%;
-      background: var(--color-surface, #111422);
-      border: 2px solid var(--color-border, #1f2945);
-      border-radius: 14px;
-      display: flex;
-      flex-direction: column;
-      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
-      overflow: hidden;
-      max-height: 360px;
     }
 
     @media (min-width: 1024px) {
-      .updates-sidebar {
-        width: 320px;
-        min-width: 300px;
-        position: sticky;
-        top: 80px;
-        max-height: calc(100vh - 100px);
+      .arena-viewport {
+        height: calc(100vh - var(--header-height, 56px));
+        overflow: hidden;
       }
     }
 
-    .sidebar-header {
+    /* 1. UNIFIED TOP STATUS PILL + TOAST */
+    .status-bar-zone {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+      z-index: 40;
+      flex-shrink: 0;
+    }
+
+    .unified-status-pill {
+      display: inline-flex;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
+      background: var(--color-surface, #111422);
+      border: 1px solid var(--color-border, #1f2945);
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-family: var(--font-main);
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--color-text);
+      max-width: 92vw;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .unified-status-pill.your-turn {
+      border-color: var(--color-primary);
+      box-shadow: 0 0 14px var(--color-primary-glow);
+    }
+
+    .unified-status-pill.cambio-active {
+      border-color: var(--color-secondary);
+      box-shadow: 0 0 14px var(--color-secondary-glow);
+    }
+
+    .unified-status-pill.frozen-pill {
+      border-color: #7dd3fc;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--color-text-dim);
+      flex-shrink: 0;
+    }
+
+    .status-dot.active {
+      background: var(--color-success);
+    }
+
+    .cambio-chip {
+      background: var(--color-secondary);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 900;
+      padding: 2px 8px;
+      border-radius: 999px;
+      letter-spacing: 0.5px;
+    }
+
+    .pill-action-btn {
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      font-family: var(--font-main);
+      font-size: 11px;
+      font-weight: 800;
+      padding: 4px 10px;
+      border-radius: 999px;
+      cursor: pointer;
+    }
+
+    .pill-action-btn.primary {
+      background: var(--color-accent);
+      border-color: var(--color-accent);
+      color: #0b0f19;
+    }
+
+    .floating-toast {
+      position: absolute;
+      top: calc(100% + 6px);
+      padding: 5px 12px;
+      border-radius: 8px;
+      font-family: var(--font-main);
+      font-size: 11px;
+      font-weight: 800;
+      pointer-events: none;
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5);
+      animation: toastFadeIn 0.16s ease-out;
+    }
+
+    .floating-toast.tone-snap {
+      border-color: var(--color-success);
+      color: var(--color-success);
+    }
+
+    .floating-toast.tone-danger {
+      border-color: var(--color-danger);
+      color: #ff6b81;
+    }
+
+    .floating-toast.tone-cambio {
+      border-color: var(--color-secondary);
+      color: #ff4d88;
+    }
+
+    @keyframes toastFadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* 2. PERIMETER OPPONENTS */
+    .opponents-perimeter {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      max-width: 1320px;
+      flex-shrink: 0;
+    }
+
+    .opponent-seat {
+      background: var(--color-surface, #111422);
+      border: 1px solid var(--color-border, #1f2945);
+      border-radius: 10px;
+      padding: 6px 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+
+    .opponents-perimeter.dense .opponent-seat {
+      padding: 5px 8px;
+      gap: 4px;
+    }
+
+    .opponent-seat.active-turn {
+      border-color: var(--color-primary);
+      box-shadow: 0 0 12px var(--color-primary-glow);
+      transform: translateY(-2px);
+    }
+
+    .opponent-seat.frozen-seat,
+    .local-mat.frozen-mat {
+      border-color: #7dd3fc;
+      background: linear-gradient(180deg, rgba(56, 189, 248, 0.08) 0%, var(--color-surface, #111422) 100%);
+    }
+
+    .opponent-seat.disconnected {
+      opacity: 0.55;
+    }
+
+    .seat-header {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--font-main);
+      font-size: 11px;
+      font-weight: 700;
+      max-width: 150px;
+    }
+
+    .seat-name {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 82px;
+    }
+
+    .seat-count {
+      font-size: 10px;
+      color: var(--color-text-muted);
+    }
+
+    .seat-badge {
+      font-size: 9px;
+      padding: 1px 4px;
+      border-radius: 4px;
+      font-weight: 900;
+    }
+
+    .seat-badge.frozen {
+      background: rgba(125, 211, 252, 0.16);
+      color: #7dd3fc;
+    }
+
+    .seat-badge.offline {
+      background: rgba(255, 23, 68, 0.2);
+      color: var(--color-danger);
+    }
+
+    .seat-cards-grid {
+      display: grid;
+      grid-template-columns: repeat(2, auto);
+      gap: 4px;
+    }
+
+    .seat-cards-grid.expanded {
+      grid-template-columns: repeat(3, auto);
+    }
+
+    /* 3. CENTER TABLE & FLOATING DRAWN CARD */
+    .center-stage {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex: 1;
+      min-height: 0;
+      width: 100%;
+    }
+
+    .piles-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 22px;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--color-border);
+      padding: 12px 24px;
+      border-radius: 14px;
+    }
+
+    .pile-slot {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 5px;
+      min-width: 82px;
+    }
+
+    @media (min-width: 768px) {
+      .pile-slot {
+        min-width: 94px;
+      }
+    }
+
+    .drawn-float-slot.hidden-placeholder {
+      width: 0;
+      min-width: 0;
+      overflow: hidden;
+      opacity: 0;
+      margin-left: -22px;
+    }
+
+    .pile-title {
+      font-size: 10px;
+      font-weight: 800;
+      color: var(--color-text-muted);
+      letter-spacing: 1px;
+      font-family: var(--font-main);
+      text-transform: uppercase;
+    }
+
+    .pile-anchor, .drawn-anchor {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .pile-anchor.can-interact {
+      cursor: pointer;
+    }
+
+    .pile-anchor.discard-target {
+      border-radius: 10px;
+      box-shadow: 0 0 16px var(--color-secondary-glow);
+    }
+
+    .deck-layer {
+      position: absolute;
+      inset: 0;
+      border-radius: 9px;
+      background: var(--card-back-bg);
+      border: 1px solid var(--color-border);
+      pointer-events: none;
+    }
+
+    .layer-b { transform: translate(-4px, 4px); }
+    .layer-a { transform: translate(-2px, 2px); }
+
+    .empty-cache-box {
+      width: 80px;
+      height: 112px;
+      border: 1.5px dashed var(--color-border);
+      border-radius: 9px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      color: var(--color-text-dim);
+      font-family: var(--font-main);
+    }
+
+    @media (min-width: 768px) {
+      .empty-cache-box {
+        width: 92px;
+        height: 130px;
+      }
+    }
+
+    .pile-meta {
+      font-size: 10px;
+      color: var(--color-text-muted);
+      font-family: var(--font-main);
+      text-align: center;
+      max-width: 110px;
+    }
+
+    .pile-meta.discard-cta {
+      color: var(--color-secondary);
+      font-weight: 800;
+    }
+
+    .pile-meta.drawn-hint {
+      color: var(--color-accent);
+      font-weight: 800;
+    }
+
+    /* 4. LOCAL PLAYER HAND */
+    .local-mat {
+      background: var(--color-surface, #111422);
+      border: 1.5px solid var(--color-border);
+      border-radius: 14px;
+      padding: 10px 18px 14px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .local-mat.my-turn {
+      border-color: var(--color-primary);
+      box-shadow: 0 0 18px var(--color-primary-glow);
+    }
+
+    .local-mat-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      width: 100%;
+      font-family: var(--font-main);
+    }
+
+    .local-identity {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .local-name {
+      font-size: 13px;
+      font-weight: 900;
+      color: var(--color-text);
+    }
+
+    .local-count {
+      font-size: 11px;
+      color: var(--color-text-muted);
+    }
+
+    .cambio-btn {
+      background: var(--color-secondary);
+      color: #fff;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 7px;
+      font-size: 11px;
+      font-weight: 900;
+      font-family: var(--font-main);
+      cursor: pointer;
+      transition: opacity 0.15s ease, transform 0.15s ease;
+    }
+
+    .cambio-btn:hover:not(:disabled) {
+      transform: translateY(-1px);
+    }
+
+    .cambio-btn:disabled {
+      opacity: 0.32;
+      cursor: not-allowed;
+    }
+
+    .local-cards-grid {
+      display: grid;
+      grid-template-columns: repeat(2, auto);
+      gap: 10px 14px;
+      justify-content: center;
+    }
+
+    .local-cards-grid.expanded {
+      grid-template-columns: repeat(3, auto);
+    }
+
+    /* 5. COLLAPSIBLE LOG DRAWER */
+    .log-drawer-toggle {
+      position: fixed;
+      right: 16px;
+      bottom: 14px;
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      font-family: var(--font-main);
+      font-size: 11px;
+      font-weight: 800;
+      padding: 7px 12px;
+      border-radius: 999px;
+      cursor: pointer;
+      z-index: 150;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+    }
+
+    .log-drawer-toggle:hover {
+      border-color: var(--color-primary);
+      color: var(--color-primary);
+    }
+
+    .log-drawer {
+      position: fixed;
+      top: var(--header-height, 56px);
+      right: 0;
+      bottom: 0;
+      width: min(320px, 90vw);
+      background: var(--color-surface, #111422);
+      border-left: 1px solid var(--color-border);
+      z-index: 250;
+      display: flex;
+      flex-direction: column;
+      box-shadow: -8px 0 30px rgba(0, 0, 0, 0.6);
+      animation: drawerSlide 0.18s ease-out;
+    }
+
+    @keyframes drawerSlide {
+      from { transform: translateX(24px); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+
+    .drawer-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 12px 16px;
-      background: var(--color-surface-elevated, #1a1f35);
       border-bottom: 1px solid var(--color-border);
       font-family: var(--font-main);
-    }
-
-    .sidebar-title {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 900;
       color: var(--color-primary);
-      letter-spacing: 1px;
     }
 
-    .live-pulse-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--color-primary);
-      box-shadow: 0 0 8px var(--color-primary);
-      animation: pulseDot 1.4s infinite ease-in-out;
-    }
-
-    @keyframes pulseDot {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.4; transform: scale(0.8); }
-    }
-
-    .event-badge {
-      background: rgba(0, 0, 0, 0.4);
+    .drawer-close {
+      background: transparent;
+      border: none;
       color: var(--color-text-muted);
-      font-size: 11px;
-      font-weight: bold;
-      padding: 2px 7px;
-      border-radius: 10px;
-      border: 1px solid var(--color-border);
+      font-size: 16px;
+      cursor: pointer;
     }
 
-    .updates-feed {
+    .drawer-feed {
       flex: 1;
       overflow-y: auto;
       padding: 12px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
-      font-family: var(--font-main);
-    }
-
-    .update-item {
-      padding: 10px 12px;
-      border-radius: 8px;
-      background: rgba(0, 0, 0, 0.35);
-      border-left: 3px solid var(--color-border);
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      animation: slideIn 0.25s ease;
-    }
-
-    @keyframes slideIn {
-      from { opacity: 0; transform: translateY(-6px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    .update-meta {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-
-    .log-badge {
-      font-size: 9px;
-      font-weight: 900;
-      letter-spacing: 0.5px;
-      padding: 2px 5px;
-      border-radius: 3px;
-      text-transform: uppercase;
-    }
-
-    .update-time {
-      font-size: 10px;
-      color: var(--color-text-dim);
-    }
-
-    .update-message {
-      font-size: 12px;
-      color: var(--color-text);
-      line-height: 1.4;
-      word-break: break-word;
-    }
-
-    .update-item.log-danger {
-      border-left-color: var(--color-danger);
-      background: rgba(255, 23, 68, 0.12);
-    }
-    .update-item.log-danger .log-badge {
-      background: var(--color-danger);
-      color: #fff;
-    }
-
-    .update-item.log-snap {
-      border-left-color: var(--color-success);
-      background: rgba(0, 230, 118, 0.1);
-    }
-    .update-item.log-snap .log-badge {
-      background: var(--color-success);
-      color: #0b0f19;
-    }
-
-    .update-item.log-cambio {
-      border-left-color: var(--color-secondary);
-      background: rgba(255, 0, 85, 0.15);
-      border-left-width: 4px;
-    }
-    .update-item.log-cambio .log-badge {
-      background: var(--color-secondary);
-      color: #fff;
-    }
-
-    .update-item.log-action {
-      border-left-color: var(--color-primary);
-    }
-    .update-item.log-action .log-badge {
-      background: rgba(0, 240, 255, 0.2);
-      color: var(--color-primary);
-    }
-
-    .update-item.log-warning {
-      border-left-color: var(--color-warning);
-      background: rgba(255, 171, 0, 0.1);
-    }
-    .update-item.log-warning .log-badge {
-      background: var(--color-warning);
-      color: #0b0f19;
-    }
-
-    .update-item.log-info .log-badge {
-      background: rgba(255, 255, 255, 0.1);
-      color: var(--color-text-muted);
-    }
-
-    .empty-feed {
-      text-align: center;
-      padding: 24px;
-      font-size: 12px;
-      color: var(--color-text-muted);
-    }
-
-    /* CAMBIO ALERT BANNER */
-    .cambio-banner {
-      width: 100%;
-      background: linear-gradient(90deg, #ff0055 0%, #ff5252 50%, #ff0055 100%);
-      color: #fff;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 12px 24px;
-      border-radius: 10px;
-      box-shadow: 0 0 25px rgba(255, 0, 85, 0.7);
-      animation: alertPulse 1.2s infinite alternate;
-      font-family: var(--font-main);
-    }
-
-    @keyframes alertPulse {
-      0% { opacity: 0.85; transform: scale(0.99); }
-      100% { opacity: 1; transform: scale(1.01); }
-    }
-
-    .banner-text {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      text-align: center;
-      font-size: 14px;
-      font-weight: 900;
-      letter-spacing: 1.5px;
-    }
-
-    .siren {
-      font-size: 24px;
-    }
-
-    /* DIRECTIVE BANNER */
-    .directive-banner {
-      width: 100%;
-      background: rgba(0, 240, 255, 0.15);
-      border: 1px solid var(--color-primary);
-      border-radius: 8px;
-      padding: 10px 16px;
-      box-shadow: 0 0 15px var(--color-primary-glow);
-    }
-
-    .directive-content {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      color: var(--color-text);
-      font-family: var(--font-main);
-      font-size: 13px;
-      font-weight: bold;
-    }
-
-    .directive-icon {
-      font-size: 18px;
-      color: var(--color-primary);
-    }
-
-    .skip-btn {
-      background: transparent;
-      border: 1px solid var(--color-border);
-      color: var(--color-text-muted);
-      padding: 4px 10px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 11px;
-    }
-
-    .skip-btn:hover {
-      border-color: var(--color-danger);
-      color: var(--color-danger);
-    }
-
-    /* OPPONENTS WRAPPER */
-    .opponents-wrapper {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: center;
-      gap: 14px;
-      width: 100%;
-    }
-
-    .opponent-mat {
-      background: var(--color-surface, #111422);
-      border: 1px solid var(--color-border, #1f2945);
-      border-radius: 12px;
-      padding: 10px 14px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
       gap: 8px;
-      transition: all 0.25s ease;
-      min-width: 170px;
-    }
-
-    .opponent-mat.active-turn {
-      border-color: var(--color-primary);
-      box-shadow: 0 0 18px var(--color-primary-glow);
-      transform: translateY(-4px);
-    }
-
-    .opponent-mat.frozen-mat,
-    .local-player-area.frozen-mat {
-      border-color: #7dd3fc !important;
-      box-shadow: 0 0 18px rgba(125, 211, 252, 0.28) !important;
-      background: linear-gradient(180deg, rgba(56, 189, 248, 0.08) 0%, var(--color-surface, #111422) 100%);
-    }
-
-    .opponent-mat.disconnected {
-      opacity: 0.6;
-    }
-
-    .opponent-hud {
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      justify-content: center;
-      gap: 6px;
-      font-size: 12px;
-      font-weight: bold;
-      color: var(--color-text);
       font-family: var(--font-main);
-    }
-
-    .opp-cards-badge {
-      font-size: 10px;
-      color: var(--color-text-muted);
-    }
-
-    .frozen-badge {
-      background: rgba(125, 211, 252, 0.2);
-      border: 1px solid #7dd3fc;
-      color: #7dd3fc;
-      font-size: 9px;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-weight: 900;
-      letter-spacing: 0.5px;
-    }
-
-    .offline-badge {
-      background: rgba(255, 23, 68, 0.2);
-      color: var(--color-danger);
-      font-size: 9px;
-      padding: 2px 5px;
-      border-radius: 4px;
-    }
-
-    .turn-indicator {
-      background: var(--color-primary);
-      color: #0b0f19;
-      font-size: 9px;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-weight: 900;
-    }
-
-    .opponent-cards-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 6px;
-    }
-
-    .opponent-cards-grid.many-cards {
-      grid-template-columns: repeat(3, 1fr);
-    }
-
-    .opp-card-slot {
-      transform: scale(0.72);
-      transform-origin: center center;
-      margin: -14px -10px;
-    }
-
-    .no-cards-badge {
-      grid-column: 1 / -1;
-      padding: 12px 16px;
       font-size: 11px;
-      font-weight: 900;
-      color: var(--color-success);
-      border: 1px dashed var(--color-success);
-      border-radius: 8px;
-      text-align: center;
     }
 
-    /* CENTER TABLE */
-    .center-table {
+    .log-row {
       display: flex;
       flex-direction: column;
-      align-items: center;
-      gap: 16px;
-      margin: 10px 0;
-    }
-
-    .piles-wrapper {
-      display: flex;
-      align-items: center;
-      gap: 32px;
-      background: rgba(0, 0, 0, 0.35);
-      border: 1px solid var(--color-border);
-      padding: 16px 28px;
-      border-radius: 16px;
-      box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.6);
-    }
-
-    .pile-container {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .pile-label {
-      font-size: 11px;
-      font-weight: 900;
-      color: var(--color-text-muted);
-      letter-spacing: 1.5px;
-      font-family: var(--font-main);
-    }
-
-    .pile-count {
-      font-size: 11px;
-      color: var(--color-text-muted);
-      font-family: var(--font-main);
-    }
-
-    .deck-stack {
-      position: relative;
-    }
-
-    .deck-stack.can-draw {
-      cursor: pointer;
-    }
-
-    .deck-stack.can-draw:hover {
-      filter: drop-shadow(0 0 12px var(--color-primary-glow));
-    }
-
-    .deck-card-layer {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      border-radius: 10px;
-      background: var(--card-back-bg);
-      border: 1px solid var(--color-border);
-    }
-
-    .layer-3 { transform: translate(-4px, 4px); }
-    .layer-2 { transform: translate(-2px, 2px); }
-    .layer-1 { position: relative; }
-
-    .discard-stack {
-      min-width: 90px;
-      min-height: 126px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .discard-stack.can-draw {
-      cursor: pointer;
-    }
-
-    .empty-discard {
-      width: 90px;
-      height: 126px;
-      border: 2px dashed var(--color-border);
-      border-radius: 10px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 10px;
-      color: var(--color-text-dim);
-      font-family: var(--font-main);
-    }
-
-    /* DRAWN CARD HUD */
-    .drawn-hud {
-      background: var(--color-surface-elevated);
-      border: 2px solid var(--color-accent);
-      border-radius: 12px;
-      padding: 16px 24px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 12px;
-      box-shadow: 0 0 25px rgba(255, 230, 0, 0.35);
-      animation: popIn 0.3s ease;
-    }
-
-    @keyframes popIn {
-      from { transform: scale(0.85); opacity: 0; }
-      to { transform: scale(1); opacity: 1; }
-    }
-
-    .drawn-header {
-      text-align: center;
-      font-family: var(--font-main);
-    }
-
-    .drawn-tag {
-      font-size: 10px;
-      color: var(--color-accent);
-      font-weight: 900;
-      letter-spacing: 1px;
-    }
-
-    .drawn-header h3 {
-      font-size: 16px;
-      color: var(--color-text);
-      margin: 2px 0 0 0;
-    }
-
-    .drawn-actions {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .drawn-btn.discard {
-      background: linear-gradient(135deg, var(--color-secondary) 0%, #c20042 100%);
-      color: #fff;
-      border: none;
-      padding: 10px 20px;
-      border-radius: 8px;
-      font-size: 13px;
-      font-weight: 900;
-      cursor: pointer;
-      font-family: var(--font-main);
-      box-shadow: 0 4px 15px var(--color-secondary-glow);
-    }
-
-    .drawn-btn.discard small {
-      display: block;
-      font-size: 10px;
-      font-weight: normal;
-      opacity: 0.9;
-    }
-
-    .swap-hint {
-      font-size: 11px;
-      color: var(--color-text-muted);
-      margin: 0;
-      font-family: var(--font-main);
-      text-align: center;
-    }
-
-    .swap-hint.mandatory {
-      color: var(--color-accent);
-      font-weight: bold;
-    }
-
-    .opponent-thinking-pill {
-      background: var(--color-surface-elevated);
-      border: 1px solid var(--color-border);
-      color: var(--color-text-muted);
-      font-size: 12px;
-      padding: 8px 16px;
-      border-radius: 20px;
-      font-family: var(--font-main);
-    }
-
-    /* LOCAL PLAYER AREA */
-    .local-player-area {
-      background: var(--color-surface, #111422);
-      border: 2px solid var(--color-border);
-      border-radius: 16px;
-      padding: 18px 24px;
-      width: 100%;
-      max-width: 650px;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-      box-shadow: 0 6px 30px rgba(0, 0, 0, 0.5);
-    }
-
-    .local-player-area.my-turn {
-      border-color: var(--color-primary);
-      box-shadow: 0 0 25px var(--color-primary-glow);
-    }
-
-    .local-hud {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 10px;
-      font-family: var(--font-main);
-    }
-
-    .hud-left {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .my-avatar {
-      font-size: 24px;
-    }
-
-    .my-name {
-      display: block;
-      font-size: 14px;
-      font-weight: 900;
-      color: var(--color-text);
-    }
-
-    .my-status {
-      font-size: 11px;
-      color: var(--color-success);
-      font-weight: bold;
-    }
-
-    .my-status.waiting {
-      color: var(--color-text-muted);
-    }
-
-    .my-status.frozen {
-      color: #7dd3fc;
-    }
-
-    .cambio-action-btn {
-      background: linear-gradient(135deg, #ff0055 0%, #aa0033 100%);
-      color: #fff;
-      border: none;
-      padding: 8px 16px;
-      border-radius: 8px;
-      font-size: 12px;
-      font-weight: 900;
-      font-family: var(--font-main);
-      cursor: pointer;
-      box-shadow: 0 0 15px rgba(255, 0, 85, 0.4);
-      transition: all 0.2s;
-    }
-
-    .cambio-action-btn:hover:not(:disabled) {
-      transform: scale(1.04);
-      box-shadow: 0 0 20px rgba(255, 0, 85, 0.7);
-    }
-
-    .cambio-action-btn:disabled {
-      opacity: 0.35;
-      cursor: not-allowed;
-      box-shadow: none;
-    }
-
-    .my-cards-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 16px;
-      justify-items: center;
-    }
-
-    .my-cards-grid.many-cards {
-      grid-template-columns: repeat(3, 1fr);
-    }
-
-    .my-card-slot {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 6px;
-    }
-
-    /* INITIAL PEEK BAR */
-    .initial-peek-bar {
-      background: rgba(0, 0, 0, 0.5);
-      border: 1px dashed var(--color-accent);
-      border-radius: 8px;
-      padding: 12px;
-      text-align: center;
-    }
-
-    .initial-peek-bar.waiting {
-      border-color: var(--color-primary);
-    }
-
-    .peek-instruction {
-      font-size: 12px;
-      color: var(--color-accent);
-      margin: 0 0 4px 0;
-      font-family: var(--font-main);
-    }
-
-    .peek-memory-warning {
-      font-size: 11px;
-      color: var(--color-warning);
-      margin: 0 0 10px 0;
-      font-family: var(--font-main);
-    }
-
-    .confirm-peek-btn {
-      background: var(--color-accent);
-      color: #0b0f19;
-      border: none;
-      padding: 10px 22px;
+      gap: 2px;
+      padding: 7px 9px;
       border-radius: 6px;
-      font-weight: 900;
-      font-size: 12px;
-      cursor: pointer;
-      font-family: var(--font-main);
-      box-shadow: 0 0 15px rgba(255, 230, 0, 0.35);
+      background: rgba(0, 0, 0, 0.3);
+      border-left: 3px solid var(--color-border);
     }
 
-    /* GAME OVER MODAL */
+    .log-row.log-danger { border-left-color: var(--color-danger); }
+    .log-row.log-snap { border-left-color: var(--color-success); }
+    .log-row.log-cambio { border-left-color: var(--color-secondary); }
+    .log-row.log-action { border-left-color: var(--color-primary); }
+
+    .log-time {
+      font-size: 9px;
+      color: var(--color-text-dim);
+    }
+
+    .log-msg {
+      color: var(--color-text);
+      line-height: 1.35;
+    }
+
+    /* 6. GAME OVER MODAL */
     .game-over-modal {
       position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      background: rgba(0, 0, 0, 0.85);
-      backdrop-filter: blur(6px);
+      inset: 0;
+      background: rgba(0, 0, 0, 0.8);
+      backdrop-filter: blur(5px);
       z-index: 2000;
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 20px;
+      animation: modalFadeIn 0.25s ease-out;
+    }
+
+    @keyframes modalFadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
     }
 
     .game-over-content {
       background: var(--color-surface, #111422);
       border: 2px solid var(--color-accent);
-      border-radius: 16px;
-      padding: 32px;
-      max-width: 500px;
+      border-radius: 14px;
+      padding: 28px;
+      max-width: 460px;
       width: 100%;
       text-align: center;
       font-family: var(--font-main);
-      box-shadow: 0 0 50px rgba(255, 230, 0, 0.4);
     }
 
     .victory-title {
-      font-size: 24px;
+      font-size: 22px;
       font-weight: 900;
       color: var(--color-accent);
       margin: 0 0 4px 0;
-      letter-spacing: 2px;
     }
 
     .victory-subtitle {
       font-size: 12px;
       color: var(--color-text-muted);
-      margin: 0 0 20px 0;
+      margin: 0 0 18px 0;
     }
 
     .scores-table {
       display: flex;
       flex-direction: column;
-      gap: 8px;
-      margin-bottom: 24px;
+      gap: 7px;
+      margin-bottom: 20px;
     }
 
     .score-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 10px 14px;
+      padding: 9px 12px;
       border-radius: 8px;
       background: var(--color-surface-elevated);
       border: 1px solid var(--color-border);
@@ -1086,37 +875,29 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
     .score-row.winner {
       border-color: var(--color-accent);
       background: rgba(255, 230, 0, 0.1);
-      font-weight: bold;
+      font-weight: 900;
     }
 
-    .rank-pos {
-      font-weight: 900;
-      color: var(--color-primary);
-    }
-
-    .p-pts {
-      font-weight: 900;
-      color: var(--color-accent);
-    }
+    .rank-pos { color: var(--color-primary); font-weight: 900; }
+    .p-pts { color: var(--color-accent); font-weight: 900; }
 
     .game-over-actions {
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 8px;
     }
 
     .btn-play-again {
       width: 100%;
-      background: linear-gradient(135deg, var(--color-primary) 0%, #0088cc 100%);
+      background: var(--color-primary);
       color: #0b0f19;
-      font-size: 15px;
+      font-size: 14px;
       font-weight: 900;
-      padding: 14px;
+      padding: 12px;
       border: none;
       border-radius: 8px;
       cursor: pointer;
       font-family: var(--font-main);
-      letter-spacing: 1px;
     }
 
     .btn-return-lobby {
@@ -1124,40 +905,33 @@ import { Card, Player, GameLogEntry } from '../../models/game.models';
       background: var(--color-surface-elevated);
       border: 1px solid var(--color-border);
       color: var(--color-text);
-      font-size: 13px;
-      font-weight: bold;
-      padding: 11px;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 10px;
       border-radius: 8px;
       cursor: pointer;
       font-family: var(--font-main);
     }
-
-    .btn-return-lobby:hover {
-      border-color: var(--color-primary);
-      color: var(--color-primary);
-    }
   `]
 })
 export class ArenaComponent {
+  logDrawerOpen = false;
+
   constructor(
     public gameService: GameService,
     public themeService: ThemeService
   ) {}
 
-  reversedLogs(): GameLogEntry[] {
-    return this.gameService.state().logs.slice().reverse();
+  trackPlayer(_idx: number, player: Player): string {
+    return player.id;
   }
 
-  getLogBadge(type: GameLogEntry['type']): string {
-    switch (type) {
-      case 'danger': return '⚠️ PENALTY';
-      case 'snap': return '⚡ MATCH';
-      case 'cambio': return '🚨 CAMBIO';
-      case 'action': return '🎮 ACTION';
-      case 'warning': return '⚠️ ALERT';
-      case 'info':
-      default: return 'ℹ️ SYSTEM';
-    }
+  trackSlot(idx: number): number {
+    return idx;
+  }
+
+  reversedLogs(): GameLogEntry[] {
+    return this.gameService.state().logs.slice().reverse();
   }
 
   get topDiscardCard(): Card | null {
@@ -1172,17 +946,40 @@ export class ArenaComponent {
 
   get canDrawFromDeck(): boolean {
     const s = this.gameService.state();
-    return this.gameService.isMyTurn() && s.drawnCard === null && s.activeAction === null;
+    return (
+      !this.gameService.isAnimating() &&
+      this.gameService.isMyTurn() &&
+      s.drawnCard === null &&
+      s.activeAction === null
+    );
   }
 
-  get canDrawFromDiscard(): boolean {
+  get canDiscardHeldCard(): boolean {
     const s = this.gameService.state();
-    return this.gameService.isMyTurn() && s.drawnCard === null && s.activeAction === null && s.discardPile.length > 0;
+    return (
+      !this.gameService.isAnimating() &&
+      this.gameService.isMyTurn() &&
+      s.drawnCard !== null &&
+      s.drawnSource === 'DECK'
+    );
+  }
+
+  get canClickDiscardPile(): boolean {
+    if (this.canDiscardHeldCard) return true;
+    const s = this.gameService.state();
+    return (
+      !this.gameService.isAnimating() &&
+      this.gameService.isMyTurn() &&
+      s.drawnCard === null &&
+      s.activeAction === null &&
+      s.discardPile.length > 0
+    );
   }
 
   get canCallCambio(): boolean {
     const s = this.gameService.state();
     return (
+      !this.gameService.isAnimating() &&
       this.gameService.isMyTurn() &&
       s.drawnCard === null &&
       s.activeAction === null &&
@@ -1190,42 +987,73 @@ export class ArenaComponent {
     );
   }
 
-  get turnHintText(): string {
+  get showInitialConfirmBtn(): boolean {
+    const me = this.gameService.localPlayer();
+    return this.gameService.state().phase === 'INITIAL_PEEK' && !!me && !me.hasPeekedInitial;
+  }
+
+  get showSkipPowerBtn(): boolean {
+    const action = this.gameService.state().activeAction;
+    return (
+      !!action &&
+      action.sourcePlayerId === this.gameService.localPlayerId() &&
+      action.type !== 'TRANSFER_CARD_TO_OPPONENT'
+    );
+  }
+
+  get unifiedStatusText(): string {
     const s = this.gameService.state();
-    if (s.activeAction && s.activeAction.sourcePlayerId === this.gameService.localPlayerId()) {
-      return s.activeAction.message;
+    const me = this.gameService.localPlayer();
+
+    if (s.phase === 'INITIAL_PEEK') {
+      return me?.hasPeekedInitial
+        ? 'Cards locked — waiting for rivals...'
+        : 'Memorize your bottom 2 cards (#3 & #4)';
     }
-    if (s.drawnCard) {
-      return s.drawnSource === 'DISCARD'
-        ? 'YOUR TURN — Click a card below to swap with taken discard'
-        : 'YOUR TURN — Discard drawn card OR click a card below to swap';
+
+    if (s.phase === 'GAME_OVER') {
+      return 'Showdown — all cards revealed';
     }
-    if (s.cambioCallerId !== null) {
-      return 'FINAL PASS — Draw from deck/discard before your hand freezes!';
+
+    if (s.activeAction) {
+      if (s.activeAction.sourcePlayerId === this.gameService.localPlayerId()) {
+        return s.activeAction.message;
+      }
+      const actor = s.players.find(p => p.id === s.activeAction?.sourcePlayerId)?.name || 'Rival';
+      return `${actor} is resolving a power...`;
     }
-    return 'YOUR TURN — Draw from Buffer/Cache, or Call Cambio';
+
+    if (this.gameService.isLocalFrozen()) {
+      return '❄️ Your hand is frozen — waiting for Showdown';
+    }
+
+    if (this.gameService.isMyTurn()) {
+      if (s.drawnCard) {
+        return s.drawnSource === 'DISCARD'
+          ? 'Click one of your cards to swap'
+          : 'Swap with own card or click Burn Cache to discard';
+      }
+      return s.cambioCallerId !== null
+        ? 'Final pass — draw from Buffer or Cache'
+        : 'Your turn — draw a card or call Cambio';
+    }
+
+    return s.drawnCard
+      ? `${this.currentTurnPlayerName} is choosing a move...`
+      : `${this.currentTurnPlayerName}'s turn — click any card to match`;
   }
 
-  formatCardTitle(card: Card): string {
-    if (card.suit === 'joker') {
-      return `Joker (${card.pointValue} pts)`;
-    }
-    const suitCap = card.suit.charAt(0).toUpperCase() + card.suit.slice(1);
-    const rankLabel =
-      card.label === 'A' ? 'Ace' :
-      card.label === 'J' ? 'Jack' :
-      card.label === 'Q' ? 'Queen' :
-      card.label === 'K' ? 'King' : card.label;
-    return `${rankLabel} of ${suitCap} (${card.pointValue} ${card.pointValue === 1 || card.pointValue === -1 ? 'pt' : 'pts'})`;
+  get topDiscardHint(): string {
+    const c = this.topDiscardCard;
+    if (!c) return '0 chips';
+    return `${c.pointValue} ${c.pointValue === 1 || c.pointValue === -1 ? 'pt' : 'pts'}`;
   }
 
-  formatActionName(action: Card['action']): string {
-    switch (action) {
-      case 'PEEK_OWN': return this.themeService.currentTheme().labels.actions.peekSelf;
-      case 'PEEK_OTHER': return this.themeService.currentTheme().labels.actions.peekOther;
-      case 'SWAP': return this.themeService.currentTheme().labels.actions.blindSwap;
-      default: return '';
-    }
+  getDrawnCardCue(card: Card): string {
+    if (card.action === 'PEEK_OWN') return 'Discard = Peek Own';
+    if (card.action === 'PEEK_OTHER') return 'Discard = Peek Rival';
+    if (card.action === 'SWAP') return 'Discard = Blind Swap';
+    return `${card.pointValue} ${card.pointValue === 1 || card.pointValue === -1 ? 'pt' : 'pts'}`;
   }
 
   onDrawDeckClicked(): void {
@@ -1234,8 +1062,10 @@ export class ArenaComponent {
     }
   }
 
-  onDrawDiscardClicked(): void {
-    if (this.canDrawFromDiscard) {
+  onDiscardPileClicked(): void {
+    if (this.canDiscardHeldCard) {
+      this.gameService.discardDrawnCard();
+    } else if (this.canClickDiscardPile) {
       this.gameService.drawFromDiscard();
     }
   }
@@ -1262,10 +1092,6 @@ export class ArenaComponent {
     return false;
   }
 
-  isCardCurrentlyPeeked(card: Card): boolean {
-    return this.gameService.isCardTemporarilyOpen(card.id);
-  }
-
   isCardSelected(playerId: string, slotIndex: number): boolean {
     const action = this.gameService.state().activeAction;
     if (!action || action.sourcePlayerId !== this.gameService.localPlayerId()) return false;
@@ -1283,7 +1109,6 @@ export class ArenaComponent {
     if (this.gameService.isPlayerFrozen(playerId)) return false;
 
     const localId = this.gameService.localPlayerId();
-
     if (s.drawnCard !== null) {
       return this.gameService.isMyTurn() && playerId === localId;
     }

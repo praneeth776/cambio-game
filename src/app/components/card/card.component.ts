@@ -9,23 +9,35 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
   standalone: true,
   imports: [CommonModule],
   template: `
-    <div 
-      class="card-wrapper" 
-      [class.face-up]="isFaceUp" 
+    <!-- EMPTY GHOST SLOT PLACEHOLDER (preserves 2x2 spatial memory) -->
+    <div
+      *ngIf="isEmptySlot"
+      class="card-empty-slot"
+      [class.compact]="compact"
+      aria-label="Empty card slot">
+      <span class="empty-slot-num" *ngIf="slotIndex !== undefined">#{{ slotIndex + 1 }}</span>
+      <span class="empty-slot-lbl">SHED</span>
+    </div>
+
+    <!-- ACTIVE CARD -->
+    <button
+      *ngIf="!isEmptySlot"
+      type="button"
+      class="card-wrapper"
+      [class.compact]="compact"
+      [class.face-up]="isFaceUp"
       [class.selectable]="isSelectable && !disabled && !isFrozen"
       [class.selected]="isSelected"
-      [class.active-peek]="isPeeked"
       [class.frozen]="isFrozen"
       [class.disabled]="disabled || isFrozen"
+      [disabled]="disabled || isFrozen"
       (click)="onCardClick()">
-      
+
       <div class="card-inner">
         <!-- CARD BACK -->
         <div class="card-face card-back">
           <div class="card-back-art" [innerHTML]="sanitizedBackSvg"></div>
-          <div class="card-back-overlay">
-            <span class="slot-badge" *ngIf="slotIndex !== undefined">#{{ slotIndex + 1 }}</span>
-          </div>
+          <span class="slot-badge" *ngIf="slotIndex !== undefined">#{{ slotIndex + 1 }}</span>
           <div class="frozen-lock-overlay" *ngIf="isFrozen">
             <span>❄️</span>
           </div>
@@ -33,13 +45,6 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 
         <!-- CARD FRONT -->
         <div class="card-face card-front" *ngIf="card" [class.red-suit]="card.isRed">
-          
-          <!-- Temporary Peek 3s Timer Bar -->
-          <div class="timer-bar" *ngIf="isTemporarilyOpen">
-            <span class="timer-tag">⏱️ 3s PEEK</span>
-            <div class="timer-progress"></div>
-          </div>
-
           <div class="card-top-corner">
             <span class="rank">{{ card.label }}</span>
             <span class="suit-icon">{{ getSuitIcon(card.suit) }}</span>
@@ -47,26 +52,13 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 
           <div class="card-center">
             <div class="center-suit">{{ getSuitIcon(card.suit) }}</div>
-            <div class="center-rank">{{ card.label }}</div>
-            
-            <!-- Special Action Badges -->
-            <div class="action-tag" *ngIf="card.action === 'PEEK_OWN'">
-              ⚡ {{ themeService.currentTheme().labels.actions.peekSelf }}
-            </div>
-            <div class="action-tag" *ngIf="card.action === 'PEEK_OTHER'">
-              👁️ {{ themeService.currentTheme().labels.actions.peekOther }}
-            </div>
-            <div class="action-tag" *ngIf="card.action === 'SWAP'">
-              🔀 {{ themeService.currentTheme().labels.actions.blindSwap }}
-            </div>
-            <div class="action-tag best-pts" *ngIf="card.rank === 13 && card.isRed">
-              ★ RED KING: -1 PT ★
-            </div>
-            <div class="action-tag zero-pts" *ngIf="card.suit === 'joker'">
-              ★ JOKER: 0 PTS ★
-            </div>
-            <div class="action-tag penalty" *ngIf="card.rank === 13 && !card.isRed">
-              ⚠️ 13 PTS
+            <div
+              class="special-score-chip"
+              *ngIf="!compact && isSpecialPointCard(card)"
+              [class.best]="card.pointValue === -1"
+              [class.zero]="card.suit === 'joker'"
+              [class.worst]="card.pointValue === 13">
+              {{ card.pointValue === -1 ? '-1 PT' : card.suit === 'joker' ? '0 PT' : '13 PTS' }}
             </div>
           </div>
 
@@ -75,57 +67,118 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
             <span class="suit-icon">{{ getSuitIcon(card.suit) }}</span>
           </div>
 
-          <div class="point-badge">
-            {{ card.pointValue }} {{ (card.pointValue === 1 || card.pointValue === -1) ? 'pt' : 'pts' }}
+          <!-- Non-overlapping slim bottom 3s peek progress bar -->
+          <div class="peek-progress-track" *ngIf="isTemporarilyOpen">
+            <div class="peek-progress-fill"></div>
           </div>
         </div>
       </div>
-    </div>
+    </button>
   `,
   styles: [`
     :host {
       display: inline-block;
-      perspective: 1000px;
+      perspective: 900px;
+    }
+
+    .card-empty-slot {
+      width: 80px;
+      height: 112px;
+      border: 1.5px dashed var(--color-border, #1f2945);
+      border-radius: 9px;
+      background: rgba(0, 0, 0, 0.22);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      font-family: var(--font-main);
+      color: var(--color-text-dim);
+      user-select: none;
+    }
+
+    @media (min-width: 768px) {
+      .card-empty-slot {
+        width: 92px;
+        height: 130px;
+      }
+    }
+
+    .card-empty-slot.compact {
+      width: 52px;
+      height: 74px;
+      border-radius: 6px;
+    }
+
+    .empty-slot-num {
+      font-size: 11px;
+      font-weight: 800;
+      opacity: 0.7;
+    }
+
+    .empty-slot-lbl {
+      font-size: 8px;
+      letter-spacing: 0.8px;
+      opacity: 0.5;
     }
 
     .card-wrapper {
-      width: 90px;
-      height: 126px;
+      width: 80px;
+      height: 112px;
+      padding: 0;
+      border: none;
+      background: transparent;
       position: relative;
       cursor: pointer;
       user-select: none;
-      transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.25s ease;
+      transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.18s ease;
     }
 
     @media (min-width: 768px) {
       .card-wrapper {
-        width: 105px;
-        height: 148px;
+        width: 92px;
+        height: 130px;
       }
     }
 
+    .card-wrapper.compact {
+      width: 52px;
+      height: 74px;
+    }
+
+    .card-wrapper:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 3px;
+      border-radius: 10px;
+    }
+
     .card-wrapper.disabled {
+      cursor: default;
+    }
+
+    .card-wrapper.frozen {
       cursor: not-allowed;
-      opacity: 0.85;
+      opacity: 0.78;
     }
 
     .card-wrapper.selectable:hover {
-      transform: translateY(-8px) scale(1.04);
-      filter: drop-shadow(0 0 10px var(--color-primary-glow));
+      transform: translateY(-5px);
+    }
+
+    .card-wrapper.selectable:hover .card-back,
+    .card-wrapper.selectable:hover .card-front {
+      border-color: var(--color-primary);
+      box-shadow: 0 0 12px var(--color-primary-glow);
     }
 
     .card-wrapper.selected {
-      transform: translateY(-12px) scale(1.06);
-      filter: drop-shadow(0 0 15px var(--color-accent));
+      transform: translateY(-9px) scale(1.04);
     }
 
-    .card-wrapper.active-peek {
-      animation: peekPulse 1.5s infinite alternate;
-    }
-
-    @keyframes peekPulse {
-      0% { filter: drop-shadow(0 0 8px var(--color-primary-glow)); }
-      100% { filter: drop-shadow(0 0 20px var(--color-secondary-glow)); }
+    .card-wrapper.selected .card-back,
+    .card-wrapper.selected .card-front {
+      border-color: var(--color-accent);
+      box-shadow: 0 0 16px rgba(255, 230, 0, 0.55);
     }
 
     .card-inner {
@@ -133,9 +186,13 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
       width: 100%;
       height: 100%;
       text-align: center;
-      transition: transform 0.45s cubic-bezier(0.4, 0.0, 0.2, 1);
+      transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
       transform-style: preserve-3d;
-      border-radius: 10px;
+      border-radius: 9px;
+    }
+
+    .card-wrapper.compact .card-inner {
+      border-radius: 6px;
     }
 
     .card-wrapper.face-up .card-inner {
@@ -144,23 +201,27 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 
     .card-face {
       position: absolute;
-      width: 100%;
-      height: 100%;
+      inset: 0;
       -webkit-backface-visibility: hidden;
       backface-visibility: hidden;
-      border-radius: 10px;
+      border-radius: 9px;
       box-sizing: border-box;
       overflow: hidden;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.38);
+    }
+
+    .card-wrapper.compact .card-face {
+      border-radius: 6px;
     }
 
     /* BACK FACE */
     .card-back {
       background: var(--card-back-bg, #0b0f19);
-      border: 2px solid var(--card-back-border, #00f0ff);
+      border: 1.5px solid var(--card-back-border, #00f0ff);
       display: flex;
       align-items: center;
       justify-content: center;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
 
     .card-back-art {
@@ -174,53 +235,62 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
       height: 100%;
     }
 
-    .card-back-overlay {
+    .slot-badge {
       position: absolute;
       top: 4px;
       right: 4px;
       z-index: 2;
+      background: rgba(0, 0, 0, 0.78);
+      color: var(--color-text-muted);
+      font-size: 9px;
+      font-weight: 800;
+      padding: 1px 4px;
+      border-radius: 4px;
+      font-family: var(--font-main);
     }
 
-    .slot-badge {
-      background: rgba(0, 0, 0, 0.7);
-      color: var(--color-primary);
-      font-size: 10px;
-      font-weight: bold;
-      padding: 1px 5px;
-      border-radius: 4px;
-      border: 1px solid var(--color-primary);
-      font-family: var(--font-main);
+    .card-wrapper.compact .slot-badge {
+      font-size: 7px;
+      top: 2px;
+      right: 2px;
+      padding: 0 3px;
     }
 
     .frozen-lock-overlay {
       position: absolute;
       inset: 0;
-      background: rgba(120, 210, 255, 0.18);
-      backdrop-filter: blur(1px);
+      background: rgba(125, 211, 252, 0.16);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 24px;
+      font-size: 20px;
       z-index: 3;
       pointer-events: none;
     }
 
+    .card-wrapper.compact .frozen-lock-overlay {
+      font-size: 14px;
+    }
+
     .card-wrapper.frozen .card-back {
       border-color: #7dd3fc;
-      box-shadow: inset 0 0 14px rgba(125, 211, 252, 0.35);
     }
 
     /* FRONT FACE */
     .card-front {
       background: var(--card-front-bg, #121727);
-      border: 2px solid var(--card-front-border, #ff0055);
+      border: 1.5px solid var(--card-front-border, #ff0055);
       color: var(--card-black-suit, #00f0ff);
       transform: rotateY(180deg);
       display: flex;
       flex-direction: column;
       justify-content: space-between;
-      padding: 6px;
+      padding: 5px 6px;
       font-family: var(--font-main);
+    }
+
+    .card-wrapper.compact .card-front {
+      padding: 3px 4px;
     }
 
     .card-front.red-suit {
@@ -232,8 +302,13 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
       flex-direction: column;
       align-items: flex-start;
       line-height: 1;
-      font-weight: bold;
-      font-size: 13px;
+      font-weight: 900;
+      font-size: 12px;
+    }
+
+    .card-wrapper.compact .card-top-corner,
+    .card-wrapper.compact .card-bottom-corner {
+      font-size: 9px;
     }
 
     .card-bottom-corner {
@@ -242,7 +317,11 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
     }
 
     .suit-icon {
-      font-size: 11px;
+      font-size: 10px;
+    }
+
+    .card-wrapper.compact .suit-icon {
+      font-size: 8px;
     }
 
     .card-center {
@@ -250,115 +329,75 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      width: 85%;
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
+      gap: 3px;
+      pointer-events: none;
     }
 
     .center-suit {
       font-size: 26px;
-      opacity: 0.85;
       line-height: 1;
     }
 
-    .center-rank {
-      font-size: 18px;
-      font-weight: 900;
-      letter-spacing: -1px;
+    .card-wrapper.compact .center-suit {
+      font-size: 17px;
     }
 
-    .timer-bar {
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 18px;
-      background: rgba(0, 0, 0, 0.85);
-      border-bottom: 1px solid var(--color-primary);
-      z-index: 10;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-
-    .timer-tag {
+    .special-score-chip {
       font-size: 8px;
       font-weight: 900;
-      color: var(--color-primary);
-      text-align: center;
-      line-height: 14px;
-      letter-spacing: 0.5px;
-    }
-
-    .timer-progress {
-      height: 3px;
-      background: var(--color-primary);
-      animation: countdownBar 3s linear forwards;
-    }
-
-    @keyframes countdownBar {
-      from { width: 100%; }
-      to { width: 0%; }
-    }
-
-    .action-tag {
-      margin-top: 4px;
-      font-size: 8px;
-      font-weight: bold;
-      padding: 2px 4px;
-      background: rgba(0, 240, 255, 0.15);
-      border: 1px solid var(--color-primary);
-      color: var(--color-primary);
+      padding: 1px 4px;
       border-radius: 3px;
-      text-transform: uppercase;
+      border: 1px solid currentColor;
+      background: rgba(0, 0, 0, 0.55);
       white-space: nowrap;
-      max-width: 90%;
-      overflow: hidden;
-      text-overflow: ellipsis;
     }
 
-    .action-tag.best-pts {
-      background: rgba(0, 230, 118, 0.25);
-      border-color: #00e676;
+    .special-score-chip.best {
       color: #00e676;
-      box-shadow: 0 0 6px rgba(0, 230, 118, 0.4);
     }
 
-    .action-tag.zero-pts {
-      background: rgba(0, 240, 255, 0.2);
-      border-color: #00f0ff;
+    .special-score-chip.zero {
       color: #00f0ff;
     }
 
-    .action-tag.penalty {
-      background: rgba(255, 23, 68, 0.2);
-      border-color: #ff1744;
+    .special-score-chip.worst {
       color: #ff1744;
     }
 
-    .point-badge {
+    /* Slim bottom 3s peek timer track (zero overlap with rank/suit) */
+    .peek-progress-track {
       position: absolute;
-      bottom: 4px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(0, 0, 0, 0.65);
-      border: 1px solid currentColor;
-      font-size: 9px;
-      padding: 1px 4px;
-      border-radius: 3px;
-      font-weight: bold;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 3px;
+      background: rgba(0, 0, 0, 0.5);
+      overflow: hidden;
+    }
+
+    .peek-progress-fill {
+      height: 100%;
+      background: var(--color-primary);
+      animation: peekDrain 3s linear forwards;
+    }
+
+    @keyframes peekDrain {
+      from { transform: scaleX(1); transform-origin: left center; }
+      to { transform: scaleX(0); transform-origin: left center; }
     }
   `]
 })
 export class CardComponent {
   @Input() card: Card | null = null;
+  @Input() isEmptySlot: boolean = false;
+  @Input() compact: boolean = false;
   @Input() isFaceUp: boolean = false;
   @Input() isTemporarilyOpen: boolean = false;
   @Input() isSelectable: boolean = false;
   @Input() isSelected: boolean = false;
-  @Input() isPeeked: boolean = false;
   @Input() isFrozen: boolean = false;
   @Input() disabled: boolean = false;
   @Input() slotIndex?: number;
@@ -369,6 +408,10 @@ export class CardComponent {
 
   get sanitizedBackSvg(): SafeHtml {
     return this.sanitizer.bypassSecurityTrustHtml(this.themeService.currentTheme().cardBackSvg);
+  }
+
+  isSpecialPointCard(card: Card): boolean {
+    return card.pointValue === -1 || card.suit === 'joker' || card.pointValue === 13;
   }
 
   getSuitIcon(suit: Suit): string {
@@ -382,7 +425,7 @@ export class CardComponent {
   }
 
   onCardClick(): void {
-    if (this.disabled || this.isFrozen) return;
+    if (this.disabled || this.isFrozen || this.isEmptySlot) return;
     this.cardClicked.emit(this.slotIndex);
   }
 }

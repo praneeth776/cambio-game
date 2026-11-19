@@ -33,6 +33,7 @@
   --card-black-suit: #00f0ff;
 
   --font-main: 'JetBrains Mono', 'Courier New', monospace;
+  --header-height: 56px;
 }
 
 body {
@@ -43,6 +44,15 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow-x: hidden;
+}
+
+/* Accessibility: respect reduced motion while preserving focus & state clarity */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.08s !important;
+  }
 }
 
 /* Custom Scrollbars */
